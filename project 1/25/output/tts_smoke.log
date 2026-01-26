@@ -1,0 +1,3 @@
+[TTS] saved: /workspace/project 1/25/output/tts_smoke.wav
+[TTS] first_chunk_s=2.265 total_s=2.332 dur_s=2.457 rtf=0.949
+[TTS] headers: {'date': 'Mon, 26 Jan 2026 01:00:19 GMT', 'server': 'uvicorn', 'x-gen-latency-ms': '2247', 'x-sample-rate': '24000', 'content-type': 'audio/wav', 'transfer-encoding': 'chunked'}
