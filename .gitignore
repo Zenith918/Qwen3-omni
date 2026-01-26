@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Caches / envs
+.cache/
+pip_cache/
+miniconda3/
+envs/
+
+# Large assets / models
+models/
+backups/
+bin/
+code/
+vllm-omni/
+运行/
+
+# Logs / outputs
+**/output/
+*.log
+*.wav
+
+# Third-party clones
+**/third_party/
+
+# Misc
+.DS_Store
+
+# Workspace-specific
+tmp/

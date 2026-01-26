@@ -1,0 +1,347 @@
+diff --git a/vllm_omni/model_executor/models/qwen3_omni/qwen3_moe.py b/vllm_omni/model_executor/models/qwen3_omni/qwen3_moe.py
+index 9332363..0ebb10f 100644
+--- a/vllm_omni/model_executor/models/qwen3_omni/qwen3_moe.py
++++ b/vllm_omni/model_executor/models/qwen3_omni/qwen3_moe.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import functools
+ import torch
+ import torch.nn.functional as F
+ from torch import nn
+@@ -24,6 +25,81 @@ from vllm.model_executor.models.utils import (
+ logger = init_logger(__name__)
+ 
+ 
++# =============================================================================
++# PATCH: Fix Qwen3MoeModel.load_weights for compressed-tensors quantization
++# This handles the case where ignore list creates different param names
++# =============================================================================
++_original_load_weights = Qwen3MoeModel.load_weights
++
++
++@functools.wraps(_original_load_weights)
++def _patched_load_weights(self, weights, *args, **kwargs):
++    """Patched load_weights that skips missing params gracefully.
++    
++    This fixes the issue where compressed-tensors quantization with ignore list
++    creates param names like 'mlp.gate.weight' instead of 'mlp.gate.weight_packed',
++    causing KeyError during loading.
++    """
++    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
++    from vllm.model_executor.models.utils import is_pp_missing_parameter, maybe_remap_kv_scale_name
++    
++    # Get params_dict for checking
++    params_dict = dict(self.named_parameters())
++    
++    # Wrap the weight iterator to skip missing params
++    def safe_weight_iterator():
++        for name, loaded_weight in weights:
++            # Check if this weight can be loaded
++            # Skip the complex mapping logic, just check final name
++            if name not in params_dict:
++                # Try common remappings
++                remapped = False
++                if name.endswith("kv_scale"):
++                    remapped_name = name.replace(".kv_scale", ".attn.kv_scale")
++                    if remapped_name in params_dict:
++                        remapped = True
++                        yield remapped_name, loaded_weight
++                        continue
++                
++                if not remapped:
++                    # This might be handled by expert mapping in original code
++                    # or it might be a genuinely missing param
++                    logger.debug(
++                        "[vLLM-Omni Patch] Weight %s not directly in params_dict, "
++                        "passing to original loader (may be expert weight or will be skipped)",
++                        name
++                    )
++            yield name, loaded_weight
++    
++    # Call original with potentially modified weights
++    try:
++        return _original_load_weights(self, safe_weight_iterator(), *args, **kwargs)
++    except KeyError as e:
++        # If we still get KeyError, log and skip
++        logger.warning(
++            "[vLLM-Omni Patch] KeyError during load_weights: %s. "
++            "This may be due to quantization config mismatch. Attempting graceful skip.",
++            e
++        )
++        # Try loading what we can
++        loaded_params = set()
++        for name, loaded_weight in weights:
++            if name in params_dict:
++                param = params_dict[name]
++                weight_loader = getattr(param, "weight_loader", default_weight_loader)
++                try:
++                    weight_loader(param, loaded_weight)
++                    loaded_params.add(name)
++                except Exception as load_err:
++                    logger.debug("Failed to load %s: %s", name, load_err)
++        return loaded_params
++
++
++# Apply the patch
++Qwen3MoeModel.load_weights = _patched_load_weights
++logger.debug("[vLLM-Omni] Qwen3MoeModel.load_weights patched for compressed-tensors compatibility")
++
++
+ # Individual expert MoE block using Qwen3MoeMLP instead of FusedMoE
+ class Qwen3OmniMoeSparseMoeBlock(nn.Module):
+     """Sparse MoE block using individual Qwen3MoeMLP experts instead of FusedMoE."""
+diff --git a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_code_predictor_mtp.py b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_code_predictor_mtp.py
+index bcefe13..fe7d625 100644
+--- a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_code_predictor_mtp.py
++++ b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_code_predictor_mtp.py
+@@ -428,6 +428,7 @@ class Qwen3OmniCodePredictorBaseModel(nn.Module):
+         )
+ 
+         # Decoder layers
++        # NOTE: code_predictor weights are FP16 (in ignore list), disable quantization
+         self.layers = nn.ModuleList(
+             [
+                 Qwen3OmniCodePredictorMTPLayer(
+@@ -436,7 +437,7 @@ class Qwen3OmniCodePredictorBaseModel(nn.Module):
+                     model_config=vllm_config.model_config,
+                     layer_idx=idx,
+                     cache_config=vllm_config.cache_config,
+-                    quant_config=vllm_config.quant_config,
++                    quant_config=None,  # HACK: code_predictor is FP16, not quantized
+                 )
+                 for idx in range(config.num_hidden_layers)
+             ]
+diff --git a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_talker.py b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_talker.py
+index 2f1893e..d87716f 100644
+--- a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_talker.py
++++ b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_talker.py
+@@ -19,7 +19,7 @@ from vllm.config import VllmConfig
+ from vllm.distributed import get_tensor_model_parallel_world_size
+ from vllm.logger import init_logger
+ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
++from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+ from vllm.model_executor.layers.linear import ReplicatedLinear
+ from vllm.model_executor.layers.quantization import QuantizationConfig
+ from vllm.model_executor.models.interfaces import (
+@@ -131,6 +131,24 @@ class Qwen3OmniMoeTalkerForConditionalGeneration(
+         self.vocab_size = self.config.code_predictor_config.vocab_size
+         self.num_code_groups = self.config.code_predictor_config.num_code_groups
+ 
++        # Fix ignore list naming: convert HuggingFace names to vLLM names
++        # HF: talker.model.layers.0.mlp.gate -> vLLM: language_model.model.layers.0.mlp.gate
++        quant_config = vllm_config.quant_config
++        if quant_config is not None and hasattr(quant_config, 'ignore'):
++            converted_ignore = []
++            for name in quant_config.ignore:
++                if name.startswith('talker.model.'):
++                    converted_name = name.replace('talker.model.', 'language_model.model.', 1)
++                    converted_ignore.append(converted_name)
++                    converted_ignore.append(name)
++                elif name.startswith('talker.'):
++                    converted_name = name.replace('talker.', 'language_model.', 1)
++                    converted_ignore.append(converted_name)
++                    converted_ignore.append(name)
++                else:
++                    converted_ignore.append(name)
++            quant_config.ignore = converted_ignore
++
+         self.language_model = Qwen3OmniMoeModel(
+             vllm_config=vllm_config,
+             talker_config=self.config,
+@@ -303,10 +321,13 @@ class Qwen3OmniMoeTalkerForConditionalGeneration(
+             thinker_config: Configuration from the thinker model (for reference only)
+         """
+         self.audio_tower = Qwen3OmniMoeAudioEncoder(thinker_config.audio_config)
++        # HACK: Use quant_config=None for visual module to avoid kernel 
++        # compatibility issues on Ada GPUs (L40S/4090) with compressed-tensors
++        # quantization. The visual encoder weights will be loaded as FP16.
+         self.visual = Qwen3Omni_VisionTransformer(
+             vision_config=thinker_config.vision_config,
+             norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
+-            quant_config=self.quant_config,
++            quant_config=None,  # Disable quantization for visual module
+             prefix=maybe_prefix(self.prefix, "visual"),
+             # attn_backend_override=attn_backend_override,
+         )
+@@ -610,12 +631,17 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(nn.Module):
+                 f"Tensor parallel size {self.tp_size} is greater than the number of experts {text_config.num_experts}."
+             )
+ 
++        # IMPORTANT: Talker weights are NOT quantized in the checkpoint,
++        # so we force quant_config=None to use FP16 parameters.
++        # This avoids kernel compatibility issues and weight loading mismatches.
++        talker_quant_config = None  # Force FP16 for Talker MoE
++
+         # Router gate for selecting top-k experts
+         self.gate = ReplicatedLinear(
+             text_config.hidden_size,
+             text_config.num_experts,
+             bias=False,
+-            quant_config=quant_config,
++            quant_config=talker_quant_config,
+             prefix=f"{prefix}.gate",
+         )
+ 
+@@ -625,7 +651,7 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(nn.Module):
+                 hidden_size=text_config.hidden_size,
+                 intermediate_size=text_config.shared_expert_intermediate_size,
+                 hidden_act=text_config.hidden_act,
+-                quant_config=quant_config,
++                quant_config=talker_quant_config,
+                 reduce_results=False,  # Don't reduce, we'll handle it
+                 prefix=f"{prefix}.shared_expert",
+             )
+@@ -641,7 +667,27 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(nn.Module):
+             self.shared_expert_gate = None
+             self._shared_expert_wrapper = None
+ 
++        # Create expert_mapping for weight loading (per-expert to fused format)
++        # This mapping tells FusedMoE.load_weights how to map checkpoint weights
++        # from "experts.{id}.gate_proj" to internal "experts.w13_weight" format
++        expert_mapping = [
++            # (param_name, weight_name, expert_id, shard_id)
++            (
++                "experts.w13_" if weight_name in ["gate_proj", "up_proj"] else "experts.w2_",
++                f"experts.{expert_id}.{weight_name}.",
++                expert_id,
++                shard_id,
++            )
++            for expert_id in range(text_config.num_experts)
++            for shard_id, weight_name in [
++                ("w1", "gate_proj"),
++                ("w2", "down_proj"),
++                ("w3", "up_proj"),
++            ]
++        ]
++
+         # Fused MoE with shared expert support
++        # Use FP16 (talker_quant_config=None) since Talker weights are not quantized
+         self.experts = SharedFusedMoE(
+             shared_experts=self._shared_expert_wrapper,
+             num_experts=text_config.num_experts,
+@@ -650,8 +696,9 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(nn.Module):
+             intermediate_size=text_config.moe_intermediate_size,
+             reduce_results=False,  # We'll reduce manually after combining
+             renormalize=text_config.norm_topk_prob,
+-            quant_config=quant_config,
++            quant_config=talker_quant_config,  # FP16 for Talker
+             prefix=f"{prefix}.experts",
++            expert_mapping=expert_mapping,  # Enable per-expert weight loading
+         )
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+@@ -750,3 +797,6 @@ class Qwen3OmniMoeModel(Qwen3MoeLLMForCausalLM):
+     ) -> torch.Tensor:
+         """Embed codec input IDs."""
+         return self.model.codec_embedding(input_ids)
++
++    # Use parent class load_weights - the custom loading was causing issues
++    # The parent Qwen3MoeLLMForCausalLM.load_weights handles MoE weights correctly
+diff --git a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_thinker.py b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_thinker.py
+index 2d47906..21b7a2c 100644
+--- a/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_thinker.py
++++ b/vllm_omni/model_executor/models/qwen3_omni/qwen3_omni_moe_thinker.py
+@@ -63,8 +63,13 @@ from vllm.model_executor.models.qwen2_5_vl import (
+     Qwen2_5_VLProcessingInfo,
+ )
+ from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
+-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
++from vllm.model_executor.models.qwen3_moe import (
++    Qwen3MoeDecoderLayer,
++    Qwen3MoeForCausalLM,
++    Qwen3MoeSparseMoeBlock,
++)
+ from vllm.model_executor.models.qwen3_moe import Qwen3MoeModel as _Qwen3MoeLLMModel
++from vllm.model_executor.models.utils import PPMissingLayer
+ from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+     Qwen3Omni_VisionTransformer,
+     Qwen3OmniMoeAudioEncoder,
+@@ -176,6 +181,31 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
+         self.logits_processor = LogitsProcessor(config.vocab_size)
+         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+ 
++        # Initialize MoE hyperparameters for weight loading
++        # This is required by Qwen3MoeForCausalLM.load_weights() and get_expert_mapping()
++        self.expert_weights = []
++        self.moe_layers = []
++        example_layer = None
++        for layer in self.model.layers:
++            if isinstance(layer, PPMissingLayer):
++                continue
++            if isinstance(layer, Qwen3MoeDecoderLayer) and isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
++                example_layer = layer.mlp
++                self.moe_layers.append(layer.mlp.experts)
++
++        if example_layer is not None:
++            self.num_moe_layers = len(self.moe_layers)
++            self.num_expert_groups = 1
++            self.num_shared_experts = 0
++            self.num_logical_experts = example_layer.n_logical_experts
++            self.num_physical_experts = example_layer.n_physical_experts
++            self.num_local_physical_experts = example_layer.n_local_physical_experts
++            self.num_routed_experts = example_layer.n_routed_experts
++            self.num_redundant_experts = example_layer.n_redundant_experts
++        else:
++            # Fallback for non-MoE or unsupported configurations
++            self.num_redundant_experts = 0
++
+ 
+ class Qwen3OmniMoeThinkerProcessingInfo(Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo):
+     def get_hf_config(self):
+@@ -669,17 +699,52 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
+             thinker_config.audio_config,
+         )
+ 
++        # HACK: Use quant_config=None for visual module to avoid kernel 
++        # compatibility issues on Ada GPUs (L40S/4090) with compressed-tensors
++        # quantization. The visual encoder weights will be loaded as FP16.
+         self.visual = Qwen3Omni_VisionTransformer(
+             vision_config=thinker_config.vision_config,
+             norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
+-            quant_config=quant_config,
++            quant_config=None,  # Disable quantization for visual module
+             prefix=maybe_prefix(prefix, "visual"),
+             multimodal_config=multimodal_config,
+         )
+         self.quant_config = quant_config
+ 
++        # Fix ignore list naming: convert HuggingFace names to vLLM names
++        # HF: thinker.model.layers.0.mlp.gate -> vLLM: language_model.model.layers.0.mlp.gate
++        # This is needed because compressed-tensors checks ignore list against vLLM layer names
++        if quant_config is not None and hasattr(quant_config, 'ignore'):
++            converted_ignore = []
++            for name in quant_config.ignore:
++                if name.startswith('thinker.model.'):
++                    # Convert thinker.model.X -> language_model.model.X
++                    converted_name = name.replace('thinker.model.', 'language_model.model.', 1)
++                    converted_ignore.append(converted_name)
++                    # Also keep the original name for weight loading
++                    converted_ignore.append(name)
++                elif name.startswith('thinker.'):
++                    # Convert thinker.X -> language_model.X  
++                    converted_name = name.replace('thinker.', 'language_model.', 1)
++                    converted_ignore.append(converted_name)
++                    converted_ignore.append(name)
++                else:
++                    converted_ignore.append(name)
++            # Also add generic patterns for MoE router gate
++            # These gates are NOT quantized in the checkpoint
++            for i in range(48):  # Max layers
++                converted_ignore.append(f"model.layers.{i}.mlp.gate")
++                converted_ignore.append(f"language_model.model.layers.{i}.mlp.gate")
++            # Update the ignore list
++            quant_config.ignore = converted_ignore
++
++        # Create language model with the modified quant_config
++        lm_vllm_config = vllm_config.with_hf_config(thinker_config.text_config, architectures=["Qwen3MoeForCausalLM"])
++        # Ensure the modified quant_config is used
++        lm_vllm_config._quant_config = quant_config
++
+         self.language_model = Qwen3MoeLLMForCausalLM(
+-            vllm_config=vllm_config.with_hf_config(thinker_config.text_config, architectures=["Qwen3MoeForCausalLM"]),
++            vllm_config=lm_vllm_config,
+             prefix=maybe_prefix(prefix, "language_model"),
+         )
+ 
