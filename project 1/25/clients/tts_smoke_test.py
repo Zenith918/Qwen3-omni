@@ -8,6 +8,8 @@ import wave
 TTS_URL = os.environ.get("TTS_URL", "http://127.0.0.1:9000/tts/stream")
 OUT_WAV = os.environ.get("TTS_OUT", "/workspace/project 1/25/output/tts_smoke.wav")
 TTS_TIMEOUT_S = float(os.environ.get("TTS_TIMEOUT_S", "60"))
+TTS_ABORT_ON_FAIL = os.environ.get("TTS_ABORT_ON_FAIL", "0").lower() in ("1", "true", "yes")
+TTS_FAILURE_LOG = os.environ.get("TTS_FAILURE_LOG", "/workspace/project 1/25/output/tts_failures.jsonl")
 
 payload = {
     "text": "你好，我是你的语音助手。",
@@ -40,29 +42,54 @@ def percentile(values: list[float], p: float) -> float:
     return d0 + d1
 
 
+def _record_failure(error: str) -> None:
+    record = {
+        "ts": time.time(),
+        "error": error,
+        "text": payload.get("text", ""),
+        "length": len(payload.get("text", "")),
+    }
+    try:
+        with open(TTS_FAILURE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{record}\n")
+    except Exception:
+        pass
+
+
 def run_once(out_path: str) -> dict:
     start = time.time()
     first_chunk = None
     headers = {}
-    with requests.post(
-        TTS_URL,
-        json=payload,
-        stream=True,
-        timeout=(10, TTS_TIMEOUT_S),
-    ) as resp:
-        resp.raise_for_status()
-        headers = dict(resp.headers)
-        sr = int(resp.headers.get("x-sample-rate", "24000"))
-        with wave.open(out_path, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sr)
-            for chunk in resp.iter_content(chunk_size=4096):
-                if not chunk:
-                    continue
-                if first_chunk is None:
-                    first_chunk = time.time()
-                wf.writeframes(chunk)
+    try:
+        with requests.post(
+            TTS_URL,
+            json=payload,
+            stream=True,
+            timeout=(10, TTS_TIMEOUT_S),
+        ) as resp:
+            resp.raise_for_status()
+            headers = dict(resp.headers)
+            sr = int(resp.headers.get("x-sample-rate", "24000"))
+            with wave.open(out_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if not chunk:
+                        continue
+                    if first_chunk is None:
+                        first_chunk = time.time()
+                    wf.writeframes(chunk)
+    except Exception as e:
+        _record_failure(str(e))
+        return {
+            "first_chunk_s": -1.0,
+            "total_s": time.time() - start,
+            "dur_s": -1.0,
+            "rtf": -1.0,
+            "headers": headers,
+            "failed": True,
+        }
 
     end = time.time()
     dur_s = -1.0
@@ -80,6 +107,7 @@ def run_once(out_path: str) -> dict:
         "dur_s": dur_s,
         "rtf": rtf,
         "headers": headers,
+        "failed": False,
     }
 
 
@@ -88,9 +116,10 @@ cold_runs = []
 for i in range(COLD_RUNS):
     cold_runs.append(run_once(OUT_WAV))
 
-cold_ttfa_vals = [r["first_chunk_s"] for r in cold_runs]
-cold_total_vals = [r["total_s"] for r in cold_runs]
-cold_rtf_vals = [r["rtf"] for r in cold_runs if r["rtf"] > 0]
+cold_ttfa_vals = [r["first_chunk_s"] for r in cold_runs if not r["failed"]]
+cold_total_vals = [r["total_s"] for r in cold_runs if not r["failed"]]
+cold_rtf_vals = [r["rtf"] for r in cold_runs if r["rtf"] > 0 and not r["failed"]]
+print("[TTS] cold failed_runs=%d" % sum(1 for r in cold_runs if r["failed"]))
 print("[TTS] cold headers:", cold_runs[-1]["headers"] if cold_runs else {})
 print(
     "[TTS] cold TTFA p50=%.3f p95=%.3f"
@@ -111,11 +140,16 @@ for i in range(WARMUP_RUNS):
 
 warm_runs = []
 for i in range(WARM_RUNS):
-    warm_runs.append(run_once(OUT_WAV))
+    result = run_once(OUT_WAV)
+    warm_runs.append(result)
+    if TTS_ABORT_ON_FAIL and result["failed"]:
+        print("[TTS] abort_on_fail=true; stopping further runs")
+        break
 
-ttfa_vals = [r["first_chunk_s"] for r in warm_runs]
-total_vals = [r["total_s"] for r in warm_runs]
-rtf_vals = [r["rtf"] for r in warm_runs if r["rtf"] > 0]
+ttfa_vals = [r["first_chunk_s"] for r in warm_runs if not r["failed"]]
+total_vals = [r["total_s"] for r in warm_runs if not r["failed"]]
+rtf_vals = [r["rtf"] for r in warm_runs if r["rtf"] > 0 and not r["failed"]]
+print("[TTS] warm failed_runs=%d" % sum(1 for r in warm_runs if r["failed"]))
 
 print("[TTS] warm headers:", warm_runs[-1]["headers"] if warm_runs else {})
 print(

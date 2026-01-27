@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from typing import Generator, Optional
+from threading import Lock
 
 import numpy as np
 import soundfile as sf
@@ -26,6 +27,7 @@ _omni = None
 _sampling_params = None
 _warmup_done = False
 _first_request_done = False
+_tts_lock = Lock()
 
 
 def _build_inputs(req: "TTSRequest") -> dict:
@@ -186,43 +188,53 @@ def synthesize_stream(req: TTSRequest):
     def _gen() -> Generator[bytes, None, None]:
         global _first_request_done
         nonlocal first_out, sr, sent_samples
-        for seg_idx, seg in enumerate(segments):
-            seg_req = TTSRequest(
-                text=seg,
-                task_type=req.task_type,
-                language=req.language,
-                speaker=req.speaker,
-                instruct=req.instruct,
-                max_new_tokens=req.max_new_tokens,
-                non_streaming_mode=req.non_streaming_mode,
-            )
-            inputs = _build_inputs(seg_req)
-            sent_samples = 0
-            for stage_outputs in _omni.generate(inputs, [_sampling_params]):
-                for output in stage_outputs.request_output:
-                    audio_tensor = output.multimodal_output["audio"]
-                    sr = int(output.multimodal_output["sr"].item())
-                    audio_np = audio_tensor.float().detach().cpu().numpy()
-                    if audio_np.ndim > 1:
-                        audio_np = audio_np.flatten()
+        t_after_lock = None
+        t_before_generate = None
+        with _tts_lock:
+            t_after_lock = time.time()
+            for seg_idx, seg in enumerate(segments):
+                seg_req = TTSRequest(
+                    text=seg,
+                    task_type=req.task_type,
+                    language=req.language,
+                    speaker=req.speaker,
+                    instruct=req.instruct,
+                    max_new_tokens=req.max_new_tokens,
+                    non_streaming_mode=req.non_streaming_mode,
+                )
+                inputs = _build_inputs(seg_req)
+                sent_samples = 0
+                if t_before_generate is None:
+                    t_before_generate = time.time()
+                for stage_outputs in _omni.generate(inputs, [_sampling_params]):
+                    for output in stage_outputs.request_output:
+                        audio_tensor = output.multimodal_output["audio"]
+                        sr = int(output.multimodal_output["sr"].item())
+                        audio_np = audio_tensor.float().detach().cpu().numpy()
+                        if audio_np.ndim > 1:
+                            audio_np = audio_np.flatten()
 
-                    if len(audio_np) <= sent_samples:
-                        continue
+                        if len(audio_np) <= sent_samples:
+                            continue
 
-                    new_audio = audio_np[sent_samples:]
-                    chunk_samples = max(1, int(sr * chunk_ms / 1000))
-                    for chunk in _iter_audio_chunks(new_audio, chunk_samples):
-                        if first_out is None:
-                            first_out = time.time()
-                            print(
-                                f"[TTS] t_req_in={t_req_in:.6f} "
-                                f"t_first_audio_out={first_out:.6f} "
-                                f"ttfa={first_out - t_req_in:.3f} warm={warm_request} "
-                                f"segments={len(segments)} chunk_ms={chunk_ms}"
-                            )
-                            sys.stdout.flush()
-                        yield chunk
-                    sent_samples = len(audio_np)
+                        new_audio = audio_np[sent_samples:]
+                        chunk_samples = max(1, int(sr * chunk_ms / 1000))
+                        for chunk in _iter_audio_chunks(new_audio, chunk_samples):
+                            if first_out is None:
+                                first_out = time.time()
+                                print(
+                                    f"[TTS] t_req_in={t_req_in:.6f} "
+                                    f"t_after_lock={t_after_lock:.6f} "
+                                    f"t_before_generate={t_before_generate:.6f} "
+                                    f"t_first_audio_out={first_out:.6f} "
+                                    f"lock_wait={(t_after_lock - t_req_in):.3f} "
+                                    f"gen_to_first={(first_out - t_before_generate):.3f} "
+                                    f"ttfa={first_out - t_req_in:.3f} warm={warm_request} "
+                                    f"segments={len(segments)} chunk_ms={chunk_ms}"
+                                )
+                                sys.stdout.flush()
+                            yield chunk
+                        sent_samples = len(audio_np)
 
         t_done = time.time()
         print(

@@ -5,7 +5,6 @@ import random
 import signal
 import time
 import wave
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 from threading import Event, Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -23,12 +22,25 @@ BRIDGE_QUEUE_MAX = int(os.environ.get("BRIDGE_QUEUE_MAX", "0"))
 BRIDGE_STREAM_TIMEOUT_S = float(os.environ.get("BRIDGE_STREAM_TIMEOUT_S", "25"))
 BRIDGE_STREAM_READ_TIMEOUT_S = float(os.environ.get("BRIDGE_STREAM_READ_TIMEOUT_S", "10"))
 BRIDGE_TTS_MAX_NEW_TOKENS = int(os.environ.get("BRIDGE_TTS_MAX_NEW_TOKENS", "512"))
-BRIDGE_TTS_TIMEOUT_S = float(os.environ.get("BRIDGE_TTS_TIMEOUT_S", "60"))
-BRIDGE_TTS_WORKERS = int(os.environ.get("BRIDGE_TTS_WORKERS", "2"))
+BRIDGE_TIMEOUT_PROFILE = os.environ.get("BRIDGE_TIMEOUT_PROFILE", "sanity").lower()
+if BRIDGE_TIMEOUT_PROFILE == "long":
+    BRIDGE_TIMEOUT_CONNECT_S = float(os.environ.get("BRIDGE_TIMEOUT_CONNECT_S", "10"))
+    BRIDGE_TIMEOUT_READ_S = float(os.environ.get("BRIDGE_TIMEOUT_READ_S", "180"))
+else:
+    BRIDGE_TIMEOUT_CONNECT_S = float(os.environ.get("BRIDGE_TIMEOUT_CONNECT_S", "5"))
+    BRIDGE_TIMEOUT_READ_S = float(os.environ.get("BRIDGE_TIMEOUT_READ_S", "60"))
+
+BRIDGE_TTS_WORKERS = int(os.environ.get("BRIDGE_TTS_WORKERS", "1"))
 BRIDGE_MAX_SEGMENTS = int(os.environ.get("BRIDGE_MAX_SEGMENTS", "0"))
 BRIDGE_OVERALL_TIMEOUT_S = float(os.environ.get("BRIDGE_OVERALL_TIMEOUT_S", "180"))
 BRIDGE_WARMUP_RUNS = int(os.environ.get("BRIDGE_WARMUP_RUNS", "0"))
 BRIDGE_WARM_RUNS = int(os.environ.get("BRIDGE_WARM_RUNS", "1"))
+BRIDGE_ABORT_ON_FAIL = os.environ.get("BRIDGE_ABORT_ON_FAIL", "0").lower() in ("1", "true", "yes")
+BRIDGE_MODE = os.environ.get("BRIDGE_MODE", "llm").lower()
+BRIDGE_FORCE_FLUSH_LEN = os.environ.get("BRIDGE_FORCE_FLUSH_LEN", "0").lower() in ("1", "true", "yes")
+BRIDGE_FLUSH_MIN_CHARS = int(os.environ.get("BRIDGE_FLUSH_MIN_CHARS", "8"))
+BRIDGE_FLUSH_MAX_CHARS = int(os.environ.get("BRIDGE_FLUSH_MAX_CHARS", "12"))
+BRIDGE_STATIC_SEGMENTS = os.environ.get("BRIDGE_STATIC_SEGMENTS", "").strip()
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -40,6 +52,21 @@ BRIDGE_MAX_TOKENS = int(os.environ.get("BRIDGE_MAX_TOKENS", "256"))
 starter_candidates = ["嗯…", "我在", "好的", "我听到了", "请说", "在的"]
 stop_event = Event()
 
+
+def _record_failure(seg_idx: int, text: str, queue_depth: int) -> None:
+    failure_path = os.path.join(OUT_DIR, "bridge_failures.jsonl")
+    record = {
+        "ts": time.time(),
+        "segment_idx": seg_idx,
+        "text": text,
+        "length": len(text),
+        "queue_depth": queue_depth,
+    }
+    try:
+        with open(failure_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 def percentile(values: list[float], p: float) -> float:
     if not values:
@@ -109,7 +136,14 @@ def _run_stop_server() -> None:
     thread.start()
 
 
-def tts_call(text: str, idx: int) -> tuple[float, str]:
+def tts_call(
+    session: requests.Session,
+    text: str,
+    idx: int,
+    seg_type: str,
+    t_seg_created: float,
+    preview: str,
+) -> tuple[float, str, float, float, float]:
     payload = {
         "text": text,
         "task_type": "CustomVoice",
@@ -119,15 +153,16 @@ def tts_call(text: str, idx: int) -> tuple[float, str]:
         "max_new_tokens": BRIDGE_TTS_MAX_NEW_TOKENS,
         "non_streaming_mode": False,
     }
-    start = time.time()
+    t_tts_req_sent = time.time()
     first_chunk = None
+    t_tts_done = None
     out_path = os.path.join(OUT_DIR, f"chunk_{idx:02d}.wav")
     try:
-        with requests.post(
+        with session.post(
             TTS_URL,
             json=payload,
             stream=True,
-            timeout=(10, BRIDGE_TTS_TIMEOUT_S),
+            timeout=(BRIDGE_TIMEOUT_CONNECT_S, BRIDGE_TIMEOUT_READ_S),
         ) as resp:
             resp.raise_for_status()
             sr = int(resp.headers.get("x-sample-rate", "24000"))
@@ -141,14 +176,56 @@ def tts_call(text: str, idx: int) -> tuple[float, str]:
                     if first_chunk is None:
                         first_chunk = time.time()
                     wf.writeframes(chunk)
-    except requests.exceptions.RequestException:
-        return -1.0, out_path
-    return first_chunk if first_chunk else -1.0, out_path
+            t_tts_done = time.time()
+    except requests.exceptions.RequestException as e:
+        t_tts_done = time.time()
+        print(
+            "[BRIDGE_SEG] idx=%d type=%s chars=%d preview=%s "
+            "t_seg_created=%.6f t_tts_req_sent=%.6f t_tts_first_byte=-1.000000 t_tts_done=%.6f "
+            "queue_wait=%.3f tts_ttfa_client=-1.000 err=%s"
+            % (
+                idx,
+                seg_type,
+                len(text),
+                preview,
+                t_seg_created,
+                t_tts_req_sent,
+                t_tts_done,
+                t_tts_req_sent - t_seg_created,
+                str(e),
+            )
+        )
+        return -1.0, out_path, t_tts_req_sent, -1.0, t_tts_done
+
+    t_tts_first_byte = first_chunk if first_chunk else -1.0
+    t_tts_done = t_tts_done if t_tts_done else time.time()
+    queue_wait = t_tts_req_sent - t_seg_created
+    tts_ttfa_client = (t_tts_first_byte - t_tts_req_sent) if t_tts_first_byte > 0 else -1.0
+    print(
+        "[BRIDGE_SEG] idx=%d type=%s chars=%d preview=%s "
+        "t_seg_created=%.6f t_tts_req_sent=%.6f t_tts_first_byte=%.6f t_tts_done=%.6f "
+        "queue_wait=%.3f tts_ttfa_client=%.3f"
+        % (
+            idx,
+            seg_type,
+            len(text),
+            preview,
+            t_seg_created,
+            t_tts_req_sent,
+            t_tts_first_byte,
+            t_tts_done,
+            queue_wait,
+            tts_ttfa_client,
+        )
+    )
+    return t_tts_first_byte if t_tts_first_byte else -1.0, out_path, t_tts_req_sent, t_tts_first_byte, t_tts_done
 
 
 def run_once(run_idx: int | None = None) -> dict:
     stop_event.clear()
     start = time.time()
+    if BRIDGE_TTS_WORKERS != 1:
+        print(f"[BRIDGE] warning: BRIDGE_TTS_WORKERS={BRIDGE_TTS_WORKERS} ignored; forced sequential")
     payload = {
         "model": LLM_MODEL,
         "messages": [
@@ -165,7 +242,9 @@ def run_once(run_idx: int | None = None) -> dict:
     buffer = ""
     idx = 0
     out_paths: list[str] = []
-    futures = []
+    results: list[tuple[int, float, str, float, float, float, str]] = []
+    nonlocal_failed = [0]
+    queue_len_peak = 0
     flush_stats = {"punct": 0, "len": 0, "starter": 0}
     segment_queue = Queue(maxsize=BRIDGE_QUEUE_MAX) if BRIDGE_QUEUE_MAX > 0 else Queue()
 
@@ -176,7 +255,7 @@ def run_once(run_idx: int | None = None) -> dict:
     signal.signal(signal.SIGTERM, _handle_sigint)
 
     def producer():
-        nonlocal buffer, idx
+        nonlocal buffer, idx, queue_len_peak
         if stop_event.is_set():
             segment_queue.put(None)
             return
@@ -186,16 +265,33 @@ def run_once(run_idx: int | None = None) -> dict:
         if starter:
             idx += 1
             flush_stats["starter"] += 1
-            segment_queue.put((starter, idx))
+            qdepth = segment_queue.qsize()
+            segment_queue.put((starter, idx, qdepth, "starter", time.time()))
+            queue_len_peak = max(queue_len_peak, qdepth)
             if BRIDGE_MAX_SEGMENTS > 0 and idx >= BRIDGE_MAX_SEGMENTS:
                 stop_event.set()
+
+        if BRIDGE_MODE == "static":
+            segments = []
+            if BRIDGE_STATIC_SEGMENTS:
+                segments = [s.strip() for s in BRIDGE_STATIC_SEGMENTS.split("|") if s.strip()]
+            else:
+                segments = ["你好。", "我在这里。", "请继续说。"]
+            for seg in segments:
+                idx += 1
+                flush_stats["len"] += 1
+                qdepth = segment_queue.qsize()
+                segment_queue.put((seg, idx, qdepth, "main", time.time()))
+                queue_len_peak = max(queue_len_peak, qdepth)
+            segment_queue.put(None)
+            return
 
         try:
             with requests.post(
                 f"{LLM_BASE_URL}/v1/chat/completions",
                 json=payload,
                 stream=True,
-                timeout=(10, BRIDGE_STREAM_READ_TIMEOUT_S),
+                timeout=(BRIDGE_TIMEOUT_CONNECT_S, BRIDGE_TIMEOUT_READ_S),
             ) as resp:
                 resp.raise_for_status()
                 for data in sse_stream(resp):
@@ -207,11 +303,16 @@ def run_once(run_idx: int | None = None) -> dict:
                     delta = chunk["choices"][0].get("delta", {})
                     if "content" in delta:
                         buffer += delta["content"]
-                        should, reason = should_flush(buffer)
+                        should, reason = should_flush(buffer, BRIDGE_FLUSH_MIN_CHARS, BRIDGE_FLUSH_MAX_CHARS)
+                        if BRIDGE_FORCE_FLUSH_LEN and len(buffer.strip()) >= BRIDGE_FLUSH_MIN_CHARS:
+                            should = True
+                            reason = "len"
                         if should:
                             idx += 1
                             flush_stats[reason] += 1
-                            segment_queue.put((buffer.strip(), idx))
+                            qdepth = segment_queue.qsize()
+                            segment_queue.put((buffer.strip(), idx, qdepth, "main", time.time()))
+                            queue_len_peak = max(queue_len_peak, qdepth)
                             buffer = ""
                             if BRIDGE_MAX_SEGMENTS > 0 and idx >= BRIDGE_MAX_SEGMENTS:
                                 stop_event.set()
@@ -224,10 +325,12 @@ def run_once(run_idx: int | None = None) -> dict:
         if not stop_event.is_set() and buffer.strip():
             idx += 1
             flush_stats["len"] += 1
-            segment_queue.put((buffer.strip(), idx))
+            qdepth = segment_queue.qsize()
+            segment_queue.put((buffer.strip(), idx, qdepth, "main", time.time()))
+            queue_len_peak = max(queue_len_peak, qdepth)
         segment_queue.put(None)
 
-    def consumer(pool: ThreadPoolExecutor):
+    def consumer():
         while True:
             try:
                 item = segment_queue.get(timeout=0.2)
@@ -236,37 +339,31 @@ def run_once(run_idx: int | None = None) -> dict:
             if item is None:
                 segment_queue.task_done()
                 break
-            text, seg_idx = item
-            futures.append(pool.submit(tts_call, text, seg_idx))
+            text, seg_idx, qdepth, seg_type, t_seg_created = item
+            preview = text[:20].replace("\n", " ")
+            first_chunk_ts, out_path, t_req_sent, t_first, t_done = tts_call(
+                session, text, seg_idx, seg_type, t_seg_created, preview
+            )
+            results.append((seg_idx, first_chunk_ts, out_path, t_req_sent, t_first, t_done, seg_type))
+            if first_chunk_ts <= 0:
+                nonlocal_failed[0] += 1
+                _record_failure(seg_idx, text, qdepth)
             segment_queue.task_done()
 
-    with ThreadPoolExecutor(max_workers=BRIDGE_TTS_WORKERS) as pool:
+    with requests.Session() as session:
         prod_thread = Thread(target=producer, daemon=True)
-        cons_thread = Thread(target=consumer, args=(pool,), daemon=True)
+        cons_thread = Thread(target=consumer, daemon=True)
         prod_thread.start()
         cons_thread.start()
         prod_thread.join()
         cons_thread.join()
 
-        first_audio = None
-        deadline = start + BRIDGE_OVERALL_TIMEOUT_S
-        try:
-            for fut in as_completed(futures, timeout=max(0.1, BRIDGE_OVERALL_TIMEOUT_S)):
-                if time.time() > deadline:
-                    break
-                if stop_event.is_set() and fut.cancel():
-                    continue
-                first_chunk_ts, out_path = fut.result()
-                out_paths.append(out_path)
-                if isinstance(first_chunk_ts, float) and first_chunk_ts > 0:
-                    if first_audio is None or first_chunk_ts < first_audio:
-                        first_audio = first_chunk_ts
-        except Exception:
-            pass
-
-        for fut in futures:
-            if not fut.done():
-                fut.cancel()
+    results.sort(key=lambda x: x[0])
+    first_audio = None
+    for _, first_chunk_ts, out_path, _, _, _, _ in results:
+        out_paths.append(out_path)
+        if first_audio is None and isinstance(first_chunk_ts, float) and first_chunk_ts > 0:
+            first_audio = first_chunk_ts
 
     total = time.time() - start
     first_audio_s = (first_audio - start) if first_audio else -1.0
@@ -276,20 +373,24 @@ def run_once(run_idx: int | None = None) -> dict:
             total_audio_s += sf.info(path).duration
         except Exception:
             pass
+    failed = nonlocal_failed[0]
     prefix = f"[BRIDGE][RUN {run_idx:02d}] " if run_idx is not None else "[BRIDGE] "
     print(
         prefix
-        + "chunks=%d first_audio_s=%.3f total_s=%.3f audio_s=%.3f "
-        "flush_punct=%d flush_len=%d starter=%d stop=%s"
+        + "ttfa_s=%.3f first_audio_s=%.3f total_s=%.3f audio_s=%.3f "
+        "chunks=%d queue_len_peak=%d flush_punct=%d flush_len=%d starter=%d stop=%s failed=%d"
         % (
-            idx,
+            first_audio_s,
             first_audio_s,
             total,
             total_audio_s,
+            idx,
+            queue_len_peak,
             flush_stats["punct"],
             flush_stats["len"],
             flush_stats["starter"],
             str(stop_event.is_set()).lower(),
+            failed,
         )
     )
     return {
@@ -301,6 +402,8 @@ def run_once(run_idx: int | None = None) -> dict:
         "flush_len": flush_stats["len"],
         "starter": flush_stats["starter"],
         "stopped": stop_event.is_set(),
+        "failed": failed,
+        "queue_len_peak": queue_len_peak,
     }
 
 
@@ -312,7 +415,11 @@ def main():
 
     warm_results = []
     for i in range(BRIDGE_WARM_RUNS):
-        warm_results.append(run_once(i + 1))
+        result = run_once(i + 1)
+        warm_results.append(result)
+        if BRIDGE_ABORT_ON_FAIL and result["failed"] > 0:
+            print("[BRIDGE] abort_on_fail=true; stopping further runs")
+            break
 
     ok_runs = [r for r in warm_results if r["first_audio_s"] > 0]
     first_audio_vals = [r["first_audio_s"] for r in ok_runs]
@@ -322,6 +429,8 @@ def main():
     flush_punct_vals = [r["flush_punct"] for r in ok_runs]
     flush_len_vals = [r["flush_len"] for r in ok_runs]
     starter_vals = [r["starter"] for r in ok_runs]
+    failed_total = sum(r["failed"] for r in warm_results)
+    failed_runs = sum(1 for r in warm_results if r["failed"] > 0 or r["first_audio_s"] <= 0)
 
     print(
         "[BRIDGE] first_audio_s p50=%.3f p95=%.3f (n=%d)"
@@ -341,6 +450,7 @@ def main():
         print("[BRIDGE] flush_len avg=%.2f" % (sum(flush_len_vals) / len(flush_len_vals)))
     if starter_vals:
         print("[BRIDGE] starter avg=%.2f" % (sum(starter_vals) / len(starter_vals)))
+    print("[BRIDGE] failed_runs=%d failed_segments=%d" % (failed_runs, failed_total))
 
 
 if __name__ == "__main__":

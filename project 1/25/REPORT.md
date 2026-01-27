@@ -54,18 +54,20 @@
   - tokens: **221**
   - peak VRAM: **约 32.9 GiB / 46.1 GiB**（运行中 nvidia-smi）
 - TTS（`tts_smoke_test.py`）
-  - cold 首包延迟: **1.066s**
-  - warm TTFA P50/P95: **1.013s / 1.309s**
-  - warm 总耗时 P50/P95: **3.099s / 3.702s**
-  - warm RTF P50/P95: **0.915 / 0.931**
+  - cold TTFA P50/P95: **1.125s / 1.293s**（n=5, fail=0）
+  - cold 总耗时 P50/P95: **3.573s / 3.790s**
+  - cold RTF P50/P95: **0.945 / 0.959**
+  - warm TTFA P50/P95: **1.129s / 1.348s**（n=20, fail=0）
+  - warm 总耗时 P50/P95: **3.269s / 3.914s**
+  - warm RTF P50/P95: **0.931 / 0.970**
   - 头信息：`x-sample-rate=24000`, `x-chunk-ms=30`, `x-warm-request`, `x-segments=2`
   - 备注：已避开 LLM 加载并发
 - Bridge（`bridge_demo.py`）
-  - 首包可播放音频 P50/P95: **1.401s / 1.401s**（n=1）
-  - 总时长 P50/P95: **5.190s / 5.190s**（n=1）
-  - 音频总时长: **1.417s**（n=1）
+  - 首包可播放音频 P50/P95: **4.418s / 5.542s**（n=20, fail=0）
+  - 总时长 P50/P95: **7.999s / 9.419s**
+  - 音频总时长: **1.483s**（avg）
   - chunk 数 & flush 触发统计: **chunks=2, flush_punct=1, flush_len=0, starter=1**
-  - 备注：连续运行出现 TTS read timeout（需重启 TTS 服务后恢复）；本次样本来自 `BRIDGE_MAX_TOKENS=8`、`BRIDGE_MAX_SEGMENTS=2` 的短答测试
+  - 备注：当前为“分段生成 + 分块回传”，非增量 codes/解码；测试参数 `BRIDGE_MAX_TOKENS=8`、`BRIDGE_MAX_SEGMENTS=2`
 
 ## 环境信息（待补全）
 - Driver/CUDA：`550.127.05`（CUDA 12.x）
