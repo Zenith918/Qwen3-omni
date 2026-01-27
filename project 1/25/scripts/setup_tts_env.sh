@@ -5,8 +5,8 @@ export PYTHONPATH="/workspace/project 1/25/third_party/vllm-omni:${PYTHONPATH:-}
 
 pip install -U fastapi uvicorn soundfile librosa onnxruntime sox "huggingface_hub==0.36.0"
 
-TTS_MODEL_ID=${TTS_MODEL_ID:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
-TTS_MODEL_DIR=${TTS_MODEL_DIR:-/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice}
+TTS_MODEL_ID=${TTS_MODEL_ID:-Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice}
+TTS_MODEL_DIR=${TTS_MODEL_DIR:-/workspace/models/Qwen3-TTS-12Hz-0.6B-CustomVoice}
 DOWNLOAD_TTS=${DOWNLOAD_TTS:-1}
 
 if [ "$DOWNLOAD_TTS" = "1" ]; then

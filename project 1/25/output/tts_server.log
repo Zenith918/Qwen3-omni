@@ -1,64 +1,64 @@
-WARNING 01-26 00:55:21 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
-WARNING 01-26 00:55:21 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
-/workspace/project 1/25/clients/tts_server.py:37: DeprecationWarning: 
+WARNING 01-26 21:00:33 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
+WARNING 01-26 21:00:34 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
+/workspace/project 1/25/clients/tts_server.py:93: DeprecationWarning: 
         on_event is deprecated, use lifespan event handlers instead.
 
         Read more about it in the
         [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
         
   @app.on_event("startup")
-INFO:     Started server process [334847]
+INFO:     Started server process [431316]
 INFO:     Waiting for application startup.
-INFO 01-26 00:55:21 [omni.py:126] Initializing stages for model: /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice
-INFO 01-26 00:55:21 [initialization.py:232] Loaded OmniTransferConfig with 0 connector configurations
-INFO 01-26 00:55:21 [omni_stage.py:109] [OmniStage] stage_config: {'stage_id': 0, 'stage_type': 'llm', 'runtime': {'devices': '0', 'max_batch_size': 1}, 'engine_args': {'model_stage': 'qwen3_tts', 'model_arch': 'Qwen3TTSForConditionalGeneration', 'worker_cls': 'vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker', 'scheduler_cls': 'vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler', 'enforce_eager': True, 'trust_remote_code': True, 'async_scheduling': False, 'enable_prefix_caching': False, 'engine_output_type': 'audio', 'gpu_memory_utilization': 0.03, 'distributed_executor_backend': 'mp', 'max_num_batched_tokens': 200000, 'max_num_seqs': 1}, 'final_output': True, 'final_output_type': 'audio'}
-INFO 01-26 00:55:21 [omni.py:318] [Orchestrator] Waiting for 1 stages to initialize (timeout: 300s)
-[Stage-0] WARNING 01-26 00:55:28 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
-[Stage-0] WARNING 01-26 00:55:29 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
-[Stage-0] INFO 01-26 00:55:29 [omni_stage.py:499] Starting stage worker with model: /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice
-[Stage-0] INFO 01-26 00:55:29 [omni_stage.py:509] [Stage] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+INFO 01-26 21:00:34 [omni.py:126] Initializing stages for model: /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice
+INFO 01-26 21:00:34 [initialization.py:232] Loaded OmniTransferConfig with 0 connector configurations
+INFO 01-26 21:00:34 [omni_stage.py:109] [OmniStage] stage_config: {'stage_id': 0, 'stage_type': 'llm', 'runtime': {'devices': '0', 'max_batch_size': 1}, 'engine_args': {'model_stage': 'qwen3_tts', 'model_arch': 'Qwen3TTSForConditionalGeneration', 'worker_cls': 'vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker', 'scheduler_cls': 'vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler', 'enforce_eager': True, 'trust_remote_code': True, 'async_scheduling': False, 'enable_prefix_caching': False, 'engine_output_type': 'audio', 'gpu_memory_utilization': 0.03, 'distributed_executor_backend': 'mp', 'max_num_batched_tokens': 200000, 'max_num_seqs': 1}, 'final_output': True, 'final_output_type': 'audio'}
+INFO 01-26 21:00:34 [omni.py:318] [Orchestrator] Waiting for 1 stages to initialize (timeout: 300s)
+[Stage-0] WARNING 01-26 21:00:41 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
+[Stage-0] WARNING 01-26 21:00:42 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
+[Stage-0] INFO 01-26 21:00:42 [omni_stage.py:499] Starting stage worker with model: /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[Stage-0] INFO 01-26 21:00:42 [omni_stage.py:509] [Stage] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
 The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
 The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
-[Stage-0] INFO 01-26 00:55:29 [initialization.py:232] Loaded OmniTransferConfig with 0 connector configurations
+[Stage-0] INFO 01-26 21:00:42 [initialization.py:232] Loaded OmniTransferConfig with 0 connector configurations
 The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
 The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
-[Stage-0] INFO 01-26 00:55:29 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:29 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:29 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:29 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-[Stage-0] INFO 01-26 00:55:29 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-[Stage-0] INFO 01-26 00:55:38 [model.py:530] Resolved architecture: Qwen3TTSForConditionalGeneration
-[Stage-0] ERROR 01-26 00:55:38 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed., retrying 1 of 2
-[Stage-0] ERROR 01-26 00:55:40 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed.
-[Stage-0] INFO 01-26 00:55:40 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
-[Stage-0] INFO 01-26 00:55:40 [model.py:1545] Using max model len 32768
+[Stage-0] INFO 01-26 21:00:42 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:42 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:42 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:42 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[Stage-0] INFO 01-26 21:00:42 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[Stage-0] INFO 01-26 21:00:52 [model.py:530] Resolved architecture: Qwen3TTSForConditionalGeneration
+[Stage-0] ERROR 01-26 21:00:52 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed., retrying 1 of 2
+[Stage-0] ERROR 01-26 21:00:54 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed.
+[Stage-0] INFO 01-26 21:00:54 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
+[Stage-0] INFO 01-26 21:00:54 [model.py:1545] Using max model len 32768
 The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
-[Stage-0] INFO 01-26 00:55:40 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:40 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:40 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-[Stage-0] INFO 01-26 00:55:40 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-[Stage-0] INFO 01-26 00:55:40 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-[Stage-0] INFO 01-26 00:55:40 [model.py:203] Resolved architecture: Qwen3TTSForConditionalGeneration
-[Stage-0] ERROR 01-26 00:55:40 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed., retrying 1 of 2
-[Stage-0] ERROR 01-26 00:55:42 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed.
-[Stage-0] INFO 01-26 00:55:42 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
-[Stage-0] INFO 01-26 00:55:42 [model.py:1545] Using max model len 32768
-[Stage-0] INFO 01-26 00:55:42 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=200000.
-[Stage-0] WARNING 01-26 00:55:42 [scheduler.py:271] max_num_batched_tokens (200000) exceeds max_num_seqs * max_model_len (32768). This may lead to unexpected behavior.
-[Stage-0] INFO 01-26 00:55:42 [vllm.py:630] Asynchronous scheduling is disabled.
-[Stage-0] WARNING 01-26 00:55:42 [vllm.py:665] Enforce eager set, overriding optimization level to -O0
-[Stage-0] INFO 01-26 00:55:42 [vllm.py:765] Cudagraph is disabled under eager mode
+[Stage-0] INFO 01-26 21:00:54 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:54 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:54 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+[Stage-0] INFO 01-26 21:00:54 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[Stage-0] INFO 01-26 21:00:54 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[Stage-0] INFO 01-26 21:00:54 [model.py:203] Resolved architecture: Qwen3TTSForConditionalGeneration
+[Stage-0] ERROR 01-26 21:00:54 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed., retrying 1 of 2
+[Stage-0] ERROR 01-26 21:00:56 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice'. Use `repo_type` argument if needed.
+[Stage-0] INFO 01-26 21:00:56 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
+[Stage-0] INFO 01-26 21:00:56 [model.py:1545] Using max model len 32768
+[Stage-0] INFO 01-26 21:00:56 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=200000.
+[Stage-0] WARNING 01-26 21:00:56 [scheduler.py:271] max_num_batched_tokens (200000) exceeds max_num_seqs * max_model_len (32768). This may lead to unexpected behavior.
+[Stage-0] INFO 01-26 21:00:56 [vllm.py:630] Asynchronous scheduling is disabled.
+[Stage-0] WARNING 01-26 21:00:56 [vllm.py:665] Enforce eager set, overriding optimization level to -O0
+[Stage-0] INFO 01-26 21:00:56 [vllm.py:765] Cudagraph is disabled under eager mode
 The tokenizer you are loading from '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[Stage-0] WARNING 01-26 00:55:50 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
-[Stage-0] WARNING 01-26 00:55:51 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
-(EngineCore_DP0 pid=335714) [Stage-0] INFO 01-26 00:55:51 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice', speculative_config=None, tokenizer='/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [200000], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
-(EngineCore_DP0 pid=335714) [Stage-0] WARNING 01-26 00:55:51 [multiproc_executor.py:880] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
-[Stage-0] WARNING 01-26 00:55:58 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
-[Stage-0] WARNING 01-26 00:55:58 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
-[Stage-0] INFO 01-26 00:55:59 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:39635 backend=nccl
-[Stage-0] INFO 01-26 00:55:59 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
+[Stage-0] WARNING 01-26 21:01:04 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
+[Stage-0] WARNING 01-26 21:01:04 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
+(EngineCore_DP0 pid=432207) [Stage-0] INFO 01-26 21:01:04 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice', speculative_config=None, tokenizer='/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [200000], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
+(EngineCore_DP0 pid=432207) [Stage-0] WARNING 01-26 21:01:04 [multiproc_executor.py:880] Reducing Torch parallelism from 64 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+[Stage-0] WARNING 01-26 21:01:11 [mooncake_connector.py:18] Mooncake not available, MooncakeOmniConnector will not work
+[Stage-0] WARNING 01-26 21:01:11 [envs.py:194] Flash Attention library "flash_attn" not found, using pytorch attention implementation
+[Stage-0] INFO 01-26 21:01:12 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:43987 backend=nccl
+[Stage-0] INFO 01-26 21:01:12 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
 /bin/sh: 1: sox: not found
-[2026-01-26 00:56:00] WARNING __init__.py:10: SoX could not be found!
+[2026-01-26 21:01:13] WARNING __init__.py:10: SoX could not be found!
 
     If you do not have SoX, proceed here:
      - - - http://sox.sourceforge.net/ - - -
@@ -71,265 +71,72 @@ The tokenizer you are loading from '/workspace/models/Qwen3-TTS-12Hz-1.7B-Custom
 Warning: flash-attn is not installed. Will only run the manual PyTorch version. Please install flash-attn for faster inference.
 ********
  
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [gpu_model_runner.py:3808] Starting to load model /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice...
-(Worker pid=335999) [Stage-0] WARNING 01-26 00:56:00 [qwen3_tts.py:76] Flash-Attn is not installed. Using default PyTorch attention implementation.
-(Worker pid=335999) `torch_dtype` is deprecated! Use `dtype` instead!
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:00 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:06 [configuration_qwen3_tts_tokenizer_v2.py:156] encoder_config is None. Initializing encoder with default values
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:06 [configuration_qwen3_tts_tokenizer_v2.py:159] decoder_config is None. Initializing decoder with default values
-(Worker pid=335999) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-(Worker pid=335999) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 131.83it/s]
-(Worker pid=335999) 
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:08 [default_loader.py:291] Loading weights took 0.01 seconds
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:09 [gpu_model_runner.py:3905] Model loading took 3.89 GiB memory and 8.486221 seconds
-(Worker pid=335999) [Stage-0] INFO 01-26 00:56:09 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-(Worker pid=335999) [Stage-0] WARNING 01-26 00:56:16 [gpu_generation_model_runner.py:384] Dummy sampler run is not implemented for generation model
-(EngineCore_DP0 pid=335714) [Stage-0] INFO 01-26 00:56:16 [core.py:273] init engine (profile, create kv cache, warmup model) took 7.31 seconds
-(EngineCore_DP0 pid=335714) The tokenizer you are loading from '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(EngineCore_DP0 pid=335714) [Stage-0] WARNING 01-26 00:56:17 [scheduler.py:171] Using custom scheduler class vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler. This scheduler interface is not public and compatibility may not be maintained.
-(EngineCore_DP0 pid=335714) [Stage-0] WARNING 01-26 00:56:17 [core.py:130] Disabling chunked prefill for model without KVCache
-(EngineCore_DP0 pid=335714) [Stage-0] INFO 01-26 00:56:17 [vllm.py:630] Asynchronous scheduling is disabled.
-(EngineCore_DP0 pid=335714) [Stage-0] WARNING 01-26 00:56:17 [vllm.py:672] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
-(EngineCore_DP0 pid=335714) [Stage-0] INFO 01-26 00:56:17 [vllm.py:765] Cudagraph is disabled under eager mode
-[Stage-0] INFO 01-26 00:56:17 [omni_llm.py:174] Supported_tasks: ['generate']
-[Stage-0] INFO 01-26 00:56:17 [omni_stage.py:725] Max batch size: 1
-INFO 01-26 00:56:17 [omni.py:311] [Orchestrator] Stage-0 reported ready
-INFO 01-26 00:56:17 [omni.py:337] [Orchestrator] All stages initialized successfully
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [gpu_model_runner.py:3808] Starting to load model /workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice...
+(Worker pid=432495) [Stage-0] WARNING 01-26 21:01:13 [qwen3_tts.py:76] Flash-Attn is not installed. Using default PyTorch attention implementation.
+(Worker pid=432495) `torch_dtype` is deprecated! Use `dtype` instead!
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [configuration_qwen3_tts.py:489] talker_config is None. Initializing talker model with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [configuration_qwen3_tts.py:492] speaker_encoder_config is None. Initializing talker model with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:13 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:20 [configuration_qwen3_tts_tokenizer_v2.py:156] encoder_config is None. Initializing encoder with default values
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:20 [configuration_qwen3_tts_tokenizer_v2.py:159] decoder_config is None. Initializing decoder with default values
+(Worker pid=432495) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(Worker pid=432495) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 114.26it/s]
+(Worker pid=432495) 
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:22 [default_loader.py:291] Loading weights took 0.01 seconds
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:22 [gpu_model_runner.py:3905] Model loading took 3.89 GiB memory and 8.438636 seconds
+(Worker pid=432495) [Stage-0] INFO 01-26 21:01:23 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+(Worker pid=432495) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
+(Worker pid=432495) [Stage-0] WARNING 01-26 21:01:30 [gpu_generation_model_runner.py:384] Dummy sampler run is not implemented for generation model
+(EngineCore_DP0 pid=432207) [Stage-0] INFO 01-26 21:01:30 [core.py:273] init engine (profile, create kv cache, warmup model) took 7.58 seconds
+(EngineCore_DP0 pid=432207) The tokenizer you are loading from '/workspace/models/Qwen3-TTS-12Hz-1.7B-CustomVoice' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+(EngineCore_DP0 pid=432207) [Stage-0] WARNING 01-26 21:01:30 [scheduler.py:171] Using custom scheduler class vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler. This scheduler interface is not public and compatibility may not be maintained.
+(EngineCore_DP0 pid=432207) [Stage-0] WARNING 01-26 21:01:30 [core.py:130] Disabling chunked prefill for model without KVCache
+(EngineCore_DP0 pid=432207) [Stage-0] INFO 01-26 21:01:31 [vllm.py:630] Asynchronous scheduling is disabled.
+(EngineCore_DP0 pid=432207) [Stage-0] WARNING 01-26 21:01:31 [vllm.py:672] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore_DP0 pid=432207) [Stage-0] INFO 01-26 21:01:31 [vllm.py:765] Cudagraph is disabled under eager mode
+[Stage-0] INFO 01-26 21:01:31 [omni_llm.py:174] Supported_tasks: ['generate']
+[Stage-0] INFO 01-26 21:01:31 [omni_stage.py:725] Max batch size: 1
+INFO 01-26 21:01:31 [omni.py:311] [Orchestrator] Stage-0 reported ready
+INFO 01-26 21:01:31 [omni.py:337] [Orchestrator] All stages initialized successfully
+Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=432495) [Stage-0] INFO 01-26 21:01:31 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+(Worker pid=432495) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
+INFO 01-26 21:01:32 [log_utils.py:550] {'type': 'request_level_metrics',
+INFO 01-26 21:01:32 [log_utils.py:550]  'request_id': '0_9a03cb40-b460-45fe-887c-0781742e765c',
+INFO 01-26 21:01:32 [log_utils.py:550]  'e2e_time_ms': 960.8259201049805,
+INFO 01-26 21:01:32 [log_utils.py:550]  'e2e_tpt': 96.08259201049805,
+INFO 01-26 21:01:32 [log_utils.py:550]  'e2e_total_tokens': 10,
+INFO 01-26 21:01:32 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
+INFO 01-26 21:01:32 [log_utils.py:550]  'transfers_total_bytes': 0,
+INFO 01-26 21:01:32 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 936.4292621612549,
+INFO 01-26 21:01:32 [log_utils.py:550]                 'num_tokens_out': 0,
+INFO 01-26 21:01:32 [log_utils.py:550]                 'num_tokens_in': 10}}}
+
+Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.04req/s, est. speed stage-0 tok/s: 10.42, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.04req/s, est. speed stage-0 tok/s: 10.42, avg e2e_lat: 0.0ms]
+INFO 01-26 21:01:32 [omni.py:833] [Summary] {'e2e_requests': 1,
+INFO 01-26 21:01:32 [omni.py:833]  'e2e_total_time_ms': 963.0141258239746,
+INFO 01-26 21:01:32 [omni.py:833]  'e2e_sum_time_ms': 960.8259201049805,
+INFO 01-26 21:01:32 [omni.py:833]  'e2e_total_tokens': 10,
+INFO 01-26 21:01:32 [omni.py:833]  'e2e_avg_time_per_request_ms': 960.8259201049805,
+INFO 01-26 21:01:32 [omni.py:833]  'e2e_avg_tokens_per_s': 10.407712563486415,
+INFO 01-26 21:01:32 [omni.py:833]  'wall_time_ms': 963.0141258239746,
+INFO 01-26 21:01:32 [omni.py:833]  'final_stage_id': {'0_9a03cb40-b460-45fe-887c-0781742e765c': 0},
+INFO 01-26 21:01:32 [omni.py:833]  'stages': [{'stage_id': 0,
+INFO 01-26 21:01:32 [omni.py:833]              'requests': 1,
+INFO 01-26 21:01:32 [omni.py:833]              'tokens': 10,
+INFO 01-26 21:01:32 [omni.py:833]              'total_time_ms': 961.3914489746094,
+INFO 01-26 21:01:32 [omni.py:833]              'avg_time_per_request_ms': 961.3914489746094,
+INFO 01-26 21:01:32 [omni.py:833]              'avg_tokens_per_s': 10.401590331041215}],
+INFO 01-26 21:01:32 [omni.py:833]  'transfers': []}
+Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:9000 (Press CTRL+C to quit)
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:19 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:00:21 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:00:21 [log_utils.py:550]  'request_id': '0_e457bda4-b5c9-4e48-8e34-6c56efad798b',
-INFO 01-26 01:00:21 [log_utils.py:550]  'e2e_time_ms': 2241.703510284424,
-INFO 01-26 01:00:21 [log_utils.py:550]  'e2e_tpt': 149.44690068562826,
-INFO 01-26 01:00:21 [log_utils.py:550]  'e2e_total_tokens': 15,
-INFO 01-26 01:00:21 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:00:21 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:00:21 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 2214.3895626068115,
-INFO 01-26 01:00:21 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:00:21 [log_utils.py:550]                 'num_tokens_in': 15}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:02<00:00,  2.24s/req, est. speed stage-0 tok/s: 6.69, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:02<00:00,  2.24s/req, est. speed stage-0 tok/s: 6.69, avg e2e_lat: 0.0ms]
-INFO 01-26 01:00:21 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:00:21 [omni.py:833]  'e2e_total_time_ms': 2244.1909313201904,
-INFO 01-26 01:00:21 [omni.py:833]  'e2e_sum_time_ms': 2241.703510284424,
-INFO 01-26 01:00:21 [omni.py:833]  'e2e_total_tokens': 15,
-INFO 01-26 01:00:21 [omni.py:833]  'e2e_avg_time_per_request_ms': 2241.703510284424,
-INFO 01-26 01:00:21 [omni.py:833]  'e2e_avg_tokens_per_s': 6.69133983650533,
-INFO 01-26 01:00:21 [omni.py:833]  'wall_time_ms': 2244.1909313201904,
-INFO 01-26 01:00:21 [omni.py:833]  'final_stage_id': {'0_e457bda4-b5c9-4e48-8e34-6c56efad798b': 0},
-INFO 01-26 01:00:21 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:00:21 [omni.py:833]              'requests': 1,
-INFO 01-26 01:00:21 [omni.py:833]              'tokens': 15,
-INFO 01-26 01:00:21 [omni.py:833]              'total_time_ms': 2242.1798706054688,
-INFO 01-26 01:00:21 [omni.py:833]              'avg_time_per_request_ms': 2242.1798706054688,
-INFO 01-26 01:00:21 [omni.py:833]              'avg_tokens_per_s': 6.689918233879008}],
-INFO 01-26 01:00:21 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:02<?, ?it/s]
-INFO:     127.0.0.1:33730 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:33 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:00:42 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:00:42 [log_utils.py:550]  'request_id': '0_c76f5d04-50f2-4144-b855-8ece9e32ccbe',
-INFO 01-26 01:00:42 [log_utils.py:550]  'e2e_time_ms': 8602.142333984375,
-INFO 01-26 01:00:42 [log_utils.py:550]  'e2e_tpt': 268.8169479370117,
-INFO 01-26 01:00:42 [log_utils.py:550]  'e2e_total_tokens': 32,
-INFO 01-26 01:00:42 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:00:42 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:00:42 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 8594.959259033203,
-INFO 01-26 01:00:42 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:00:42 [log_utils.py:550]                 'num_tokens_in': 32}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:08<00:00,  8.60s/req, est. speed stage-0 tok/s: 3.72, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:08<00:00,  8.60s/req, est. speed stage-0 tok/s: 3.72, avg e2e_lat: 0.0ms]
-INFO 01-26 01:00:42 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:00:42 [omni.py:833]  'e2e_total_time_ms': 8603.145360946655,
-INFO 01-26 01:00:42 [omni.py:833]  'e2e_sum_time_ms': 8602.142333984375,
-INFO 01-26 01:00:42 [omni.py:833]  'e2e_total_tokens': 32,
-INFO 01-26 01:00:42 [omni.py:833]  'e2e_avg_time_per_request_ms': 8602.142333984375,
-INFO 01-26 01:00:42 [omni.py:833]  'e2e_avg_tokens_per_s': 3.7200035476718405,
-INFO 01-26 01:00:42 [omni.py:833]  'wall_time_ms': 8603.145360946655,
-INFO 01-26 01:00:42 [omni.py:833]  'final_stage_id': {'0_c76f5d04-50f2-4144-b855-8ece9e32ccbe': 0},
-INFO 01-26 01:00:42 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:00:42 [omni.py:833]              'requests': 1,
-INFO 01-26 01:00:42 [omni.py:833]              'tokens': 32,
-INFO 01-26 01:00:42 [omni.py:833]              'total_time_ms': 8602.176904678345,
-INFO 01-26 01:00:42 [omni.py:833]              'avg_time_per_request_ms': 8602.176904678345,
-INFO 01-26 01:00:42 [omni.py:833]              'avg_tokens_per_s': 3.7199885976068}],
-INFO 01-26 01:00:42 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:08<?, ?it/s]
-INFO:     127.0.0.1:59172 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:42 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:00:43 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:00:43 [log_utils.py:550]  'request_id': '0_8ae655ab-dd57-472f-8480-d9cebc83c7fe',
-INFO 01-26 01:00:43 [log_utils.py:550]  'e2e_time_ms': 800.7261753082275,
-INFO 01-26 01:00:43 [log_utils.py:550]  'e2e_tpt': 72.79328866438432,
-INFO 01-26 01:00:43 [log_utils.py:550]  'e2e_total_tokens': 11,
-INFO 01-26 01:00:43 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:00:43 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:00:43 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 794.1257953643799,
-INFO 01-26 01:00:43 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:00:43 [log_utils.py:550]                 'num_tokens_in': 11}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.25req/s, est. speed stage-0 tok/s: 13.77, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.25req/s, est. speed stage-0 tok/s: 13.77, avg e2e_lat: 0.0ms]
-INFO 01-26 01:00:43 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:00:43 [omni.py:833]  'e2e_total_time_ms': 801.6772270202637,
-INFO 01-26 01:00:43 [omni.py:833]  'e2e_sum_time_ms': 800.7261753082275,
-INFO 01-26 01:00:43 [omni.py:833]  'e2e_total_tokens': 11,
-INFO 01-26 01:00:43 [omni.py:833]  'e2e_avg_time_per_request_ms': 800.7261753082275,
-INFO 01-26 01:00:43 [omni.py:833]  'e2e_avg_tokens_per_s': 13.737530180983175,
-INFO 01-26 01:00:43 [omni.py:833]  'wall_time_ms': 801.6772270202637,
-INFO 01-26 01:00:43 [omni.py:833]  'final_stage_id': {'0_8ae655ab-dd57-472f-8480-d9cebc83c7fe': 0},
-INFO 01-26 01:00:43 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:00:43 [omni.py:833]              'requests': 1,
-INFO 01-26 01:00:43 [omni.py:833]              'tokens': 11,
-INFO 01-26 01:00:43 [omni.py:833]              'total_time_ms': 800.8980751037598,
-INFO 01-26 01:00:43 [omni.py:833]              'avg_time_per_request_ms': 800.8980751037598,
-INFO 01-26 01:00:43 [omni.py:833]              'avg_tokens_per_s': 13.73458164270766}],
-INFO 01-26 01:00:43 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-INFO:     127.0.0.1:48330 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:43 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:00:53 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:00:53 [log_utils.py:550]  'request_id': '0_8e0a20e7-9b41-40bc-b03f-e6bcc0adb96d',
-INFO 01-26 01:00:53 [log_utils.py:550]  'e2e_time_ms': 9495.938301086426,
-INFO 01-26 01:00:53 [log_utils.py:550]  'e2e_tpt': 271.3125228881836,
-INFO 01-26 01:00:53 [log_utils.py:550]  'e2e_total_tokens': 35,
-INFO 01-26 01:00:53 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:00:53 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:00:53 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 9488.40045928955,
-INFO 01-26 01:00:53 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:00:53 [log_utils.py:550]                 'num_tokens_in': 35}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:09<00:00,  9.50s/req, est. speed stage-0 tok/s: 3.69, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:09<00:00,  9.50s/req, est. speed stage-0 tok/s: 3.69, avg e2e_lat: 0.0ms]
-INFO 01-26 01:00:53 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:00:53 [omni.py:833]  'e2e_total_time_ms': 9496.307134628296,
-INFO 01-26 01:00:53 [omni.py:833]  'e2e_sum_time_ms': 9495.938301086426,
-INFO 01-26 01:00:53 [omni.py:833]  'e2e_total_tokens': 35,
-INFO 01-26 01:00:53 [omni.py:833]  'e2e_avg_time_per_request_ms': 9495.938301086426,
-INFO 01-26 01:00:53 [omni.py:833]  'e2e_avg_tokens_per_s': 3.6857863741591146,
-INFO 01-26 01:00:53 [omni.py:833]  'wall_time_ms': 9496.307134628296,
-INFO 01-26 01:00:53 [omni.py:833]  'final_stage_id': {'0_8e0a20e7-9b41-40bc-b03f-e6bcc0adb96d': 0},
-INFO 01-26 01:00:53 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:00:53 [omni.py:833]              'requests': 1,
-INFO 01-26 01:00:53 [omni.py:833]              'tokens': 35,
-INFO 01-26 01:00:53 [omni.py:833]              'total_time_ms': 9495.954036712646,
-INFO 01-26 01:00:53 [omni.py:833]              'avg_time_per_request_ms': 9495.954036712646,
-INFO 01-26 01:00:53 [omni.py:833]              'avg_tokens_per_s': 3.685780266488786}],
-INFO 01-26 01:00:53 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:09<?, ?it/s]
-INFO:     127.0.0.1:48338 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:53 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:00:56 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:00:56 [log_utils.py:550]  'request_id': '0_a7d63879-fde2-431e-98e8-11b7eafcd621',
-INFO 01-26 01:00:56 [log_utils.py:550]  'e2e_time_ms': 3233.985662460327,
-INFO 01-26 01:00:56 [log_utils.py:550]  'e2e_tpt': 190.23445073296043,
-INFO 01-26 01:00:56 [log_utils.py:550]  'e2e_total_tokens': 17,
-INFO 01-26 01:00:56 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:00:56 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:00:56 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 3226.3147830963135,
-INFO 01-26 01:00:56 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:00:56 [log_utils.py:550]                 'num_tokens_in': 17}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.23s/req, est. speed stage-0 tok/s: 5.26, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.23s/req, est. speed stage-0 tok/s: 5.26, avg e2e_lat: 0.0ms]
-INFO 01-26 01:00:56 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:00:56 [omni.py:833]  'e2e_total_time_ms': 3234.912872314453,
-INFO 01-26 01:00:56 [omni.py:833]  'e2e_sum_time_ms': 3233.985662460327,
-INFO 01-26 01:00:56 [omni.py:833]  'e2e_total_tokens': 17,
-INFO 01-26 01:00:56 [omni.py:833]  'e2e_avg_time_per_request_ms': 3233.985662460327,
-INFO 01-26 01:00:56 [omni.py:833]  'e2e_avg_tokens_per_s': 5.256671418594623,
-INFO 01-26 01:00:56 [omni.py:833]  'wall_time_ms': 3234.912872314453,
-INFO 01-26 01:00:56 [omni.py:833]  'final_stage_id': {'0_a7d63879-fde2-431e-98e8-11b7eafcd621': 0},
-INFO 01-26 01:00:56 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:00:56 [omni.py:833]              'requests': 1,
-INFO 01-26 01:00:56 [omni.py:833]              'tokens': 17,
-INFO 01-26 01:00:56 [omni.py:833]              'total_time_ms': 3234.0288162231445,
-INFO 01-26 01:00:56 [omni.py:833]              'avg_time_per_request_ms': 3234.0288162231445,
-INFO 01-26 01:00:56 [omni.py:833]              'avg_tokens_per_s': 5.256601275387961}],
-INFO 01-26 01:00:56 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:03<?, ?it/s]
-INFO:     127.0.0.1:52870 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:00:57 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:01:03 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:01:03 [log_utils.py:550]  'request_id': '0_8aacf4bc-73b6-4864-82ff-f3ad78ec6e00',
-INFO 01-26 01:01:03 [log_utils.py:550]  'e2e_time_ms': 6378.398895263672,
-INFO 01-26 01:01:03 [log_utils.py:550]  'e2e_tpt': 163.54868962214545,
-INFO 01-26 01:01:03 [log_utils.py:550]  'e2e_total_tokens': 39,
-INFO 01-26 01:01:03 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:01:03 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:01:03 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 6370.0830936431885,
-INFO 01-26 01:01:03 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:01:03 [log_utils.py:550]                 'num_tokens_in': 39}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:06<00:00,  6.38s/req, est. speed stage-0 tok/s: 6.12, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:06<00:00,  6.38s/req, est. speed stage-0 tok/s: 6.12, avg e2e_lat: 0.0ms]
-INFO 01-26 01:01:03 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:01:03 [omni.py:833]  'e2e_total_time_ms': 6378.998041152954,
-INFO 01-26 01:01:03 [omni.py:833]  'e2e_sum_time_ms': 6378.398895263672,
-INFO 01-26 01:01:03 [omni.py:833]  'e2e_total_tokens': 39,
-INFO 01-26 01:01:03 [omni.py:833]  'e2e_avg_time_per_request_ms': 6378.398895263672,
-INFO 01-26 01:01:03 [omni.py:833]  'e2e_avg_tokens_per_s': 6.1143871119380355,
-INFO 01-26 01:01:03 [omni.py:833]  'wall_time_ms': 6378.998041152954,
-INFO 01-26 01:01:03 [omni.py:833]  'final_stage_id': {'0_8aacf4bc-73b6-4864-82ff-f3ad78ec6e00': 0},
-INFO 01-26 01:01:03 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:01:03 [omni.py:833]              'requests': 1,
-INFO 01-26 01:01:03 [omni.py:833]              'tokens': 39,
-INFO 01-26 01:01:03 [omni.py:833]              'total_time_ms': 6378.425359725952,
-INFO 01-26 01:01:03 [omni.py:833]              'avg_time_per_request_ms': 6378.425359725952,
-INFO 01-26 01:01:03 [omni.py:833]              'avg_tokens_per_s': 6.114361742985988}],
-INFO 01-26 01:01:03 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:06<?, ?it/s]
-INFO:     127.0.0.1:42432 - "POST /synthesize HTTP/1.1" 200 OK
-Adding requests:   0%|          | 0/1 [00:00<?, ?it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 unit/s, output: 0.00 unit/s][A(Worker pid=335999) [Stage-0] INFO 01-26 01:01:03 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
-(Worker pid=335999) Setting `pad_token_id` to `eos_token_id`:2150 for open-end generation.
-INFO 01-26 01:01:07 [log_utils.py:550] {'type': 'request_level_metrics',
-INFO 01-26 01:01:07 [log_utils.py:550]  'request_id': '0_e3a0d319-f5f6-4c2a-bc70-cfa189b4ae2c',
-INFO 01-26 01:01:07 [log_utils.py:550]  'e2e_time_ms': 3694.782018661499,
-INFO 01-26 01:01:07 [log_utils.py:550]  'e2e_tpt': 167.94463721188632,
-INFO 01-26 01:01:07 [log_utils.py:550]  'e2e_total_tokens': 22,
-INFO 01-26 01:01:07 [log_utils.py:550]  'transfers_total_time_ms': 0.0,
-INFO 01-26 01:01:07 [log_utils.py:550]  'transfers_total_bytes': 0,
-INFO 01-26 01:01:07 [log_utils.py:550]  'stages': {0: {'stage_gen_time_ms': 3685.93692779541,
-INFO 01-26 01:01:07 [log_utils.py:550]                 'num_tokens_out': 0,
-INFO 01-26 01:01:07 [log_utils.py:550]                 'num_tokens_in': 22}}}
-
-Processed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.69s/req, est. speed stage-0 tok/s: 5.96, avg e2e_lat: 0.0ms][AProcessed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.70s/req, est. speed stage-0 tok/s: 5.96, avg e2e_lat: 0.0ms]
-INFO 01-26 01:01:07 [omni.py:833] [Summary] {'e2e_requests': 1,
-INFO 01-26 01:01:07 [omni.py:833]  'e2e_total_time_ms': 3695.4338550567627,
-INFO 01-26 01:01:07 [omni.py:833]  'e2e_sum_time_ms': 3694.782018661499,
-INFO 01-26 01:01:07 [omni.py:833]  'e2e_total_tokens': 22,
-INFO 01-26 01:01:07 [omni.py:833]  'e2e_avg_time_per_request_ms': 3694.782018661499,
-INFO 01-26 01:01:07 [omni.py:833]  'e2e_avg_tokens_per_s': 5.954343149036406,
-INFO 01-26 01:01:07 [omni.py:833]  'wall_time_ms': 3695.4338550567627,
-INFO 01-26 01:01:07 [omni.py:833]  'final_stage_id': {'0_e3a0d319-f5f6-4c2a-bc70-cfa189b4ae2c': 0},
-INFO 01-26 01:01:07 [omni.py:833]  'stages': [{'stage_id': 0,
-INFO 01-26 01:01:07 [omni.py:833]              'requests': 1,
-INFO 01-26 01:01:07 [omni.py:833]              'tokens': 22,
-INFO 01-26 01:01:07 [omni.py:833]              'total_time_ms': 3694.802761077881,
-INFO 01-26 01:01:07 [omni.py:833]              'avg_time_per_request_ms': 3694.802761077881,
-INFO 01-26 01:01:07 [omni.py:833]              'avg_tokens_per_s': 5.95430972168646}],
-INFO 01-26 01:01:07 [omni.py:833]  'transfers': []}
-Adding requests:   0%|          | 0/1 [00:03<?, ?it/s]
-INFO:     127.0.0.1:42446 - "POST /synthesize HTTP/1.1" 200 OK
-(Worker pid=335999) [Stage-0] INFO 01-26 01:28:20 [multiproc_executor.py:707] Parent process exited, terminating worker
+(Worker pid=432495) [Stage-0] INFO 01-26 21:02:04 [multiproc_executor.py:707] Parent process exited, terminating worker
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
 INFO:     Application shutdown complete.
-INFO:     Finished server process [334847]
+INFO:     Finished server process [431316]
 /usr/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 6 leaked semaphore objects to clean up at shutdown
   warnings.warn('resource_tracker: There appear to be %d '
