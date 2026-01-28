@@ -1,0 +1,14 @@
+{
+  "mae_waveform": 0.10357040166854858,
+  "snr_db": -1.625049777899159,
+  "pop_click_score": 0.06254149228334427,
+  "duration_diff_ms": -549.0,
+  "ttfa_ms": 352.34522819519043,
+  "rtf": 2.120281722995121,
+  "offset_samples": -7902,
+  "stream_rms": 0.10871034860610962,
+  "stream_peak": 0.664031982421875,
+  "offline_rms": 0.10047291219234467,
+  "offline_peak": 0.6484375,
+  "offline_total_s": 1.359727382659912
+}

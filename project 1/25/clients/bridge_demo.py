@@ -6,7 +6,7 @@ import signal
 import time
 import wave
 from queue import Queue, Empty
-from threading import Event, Thread
+from threading import Event, Thread, Lock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
@@ -49,7 +49,7 @@ user_prompt = os.environ.get(
     "请用中文介绍你能做什么，长度不超过三句话。",
 )
 BRIDGE_MAX_TOKENS = int(os.environ.get("BRIDGE_MAX_TOKENS", "256"))
-starter_candidates = ["嗯…", "我在", "好的", "我听到了", "请说", "在的"]
+starter_candidates = ["嗯", "我在", "好的", "我听到了", "请说"]
 stop_event = Event()
 
 
@@ -246,7 +246,11 @@ def run_once(run_idx: int | None = None) -> dict:
     nonlocal_failed = [0]
     queue_len_peak = 0
     flush_stats = {"punct": 0, "len": 0, "starter": 0}
+    backpressure_stats = {"pending_overwrite": 0, "pending_enqueued": 0}
     segment_queue = Queue(maxsize=BRIDGE_QUEUE_MAX) if BRIDGE_QUEUE_MAX > 0 else Queue()
+    pending_main: dict[str, tuple | None] = {"item": None}
+    pending_lock = Lock()
+    consumer_busy = Event()
 
     def _handle_sigint(signum, frame):
         stop_event.set()
@@ -281,8 +285,7 @@ def run_once(run_idx: int | None = None) -> dict:
                 idx += 1
                 flush_stats["len"] += 1
                 qdepth = segment_queue.qsize()
-                segment_queue.put((seg, idx, qdepth, "main", time.time()))
-                queue_len_peak = max(queue_len_peak, qdepth)
+                _enqueue_main((seg, idx, qdepth, "main", time.time()))
             segment_queue.put(None)
             return
 
@@ -311,8 +314,7 @@ def run_once(run_idx: int | None = None) -> dict:
                             idx += 1
                             flush_stats[reason] += 1
                             qdepth = segment_queue.qsize()
-                            segment_queue.put((buffer.strip(), idx, qdepth, "main", time.time()))
-                            queue_len_peak = max(queue_len_peak, qdepth)
+                            _enqueue_main((buffer.strip(), idx, qdepth, "main", time.time()))
                             buffer = ""
                             if BRIDGE_MAX_SEGMENTS > 0 and idx >= BRIDGE_MAX_SEGMENTS:
                                 stop_event.set()
@@ -326,12 +328,13 @@ def run_once(run_idx: int | None = None) -> dict:
             idx += 1
             flush_stats["len"] += 1
             qdepth = segment_queue.qsize()
-            segment_queue.put((buffer.strip(), idx, qdepth, "main", time.time()))
-            queue_len_peak = max(queue_len_peak, qdepth)
+            _enqueue_main((buffer.strip(), idx, qdepth, "main", time.time()))
+        _flush_pending_main(force=True)
         segment_queue.put(None)
 
     def consumer():
         while True:
+            _flush_pending_main()
             try:
                 item = segment_queue.get(timeout=0.2)
             except Empty:
@@ -341,6 +344,7 @@ def run_once(run_idx: int | None = None) -> dict:
                 break
             text, seg_idx, qdepth, seg_type, t_seg_created = item
             preview = text[:20].replace("\n", " ")
+            consumer_busy.set()
             first_chunk_ts, out_path, t_req_sent, t_first, t_done = tts_call(
                 session, text, seg_idx, seg_type, t_seg_created, preview
             )
@@ -349,6 +353,29 @@ def run_once(run_idx: int | None = None) -> dict:
                 nonlocal_failed[0] += 1
                 _record_failure(seg_idx, text, qdepth)
             segment_queue.task_done()
+            consumer_busy.clear()
+
+    def _enqueue_main(item: tuple) -> None:
+        nonlocal queue_len_peak
+        if consumer_busy.is_set() or segment_queue.qsize() > 0:
+            with pending_lock:
+                if pending_main["item"] is not None:
+                    backpressure_stats["pending_overwrite"] += 1
+                pending_main["item"] = item
+            return
+        segment_queue.put(item)
+        queue_len_peak = max(queue_len_peak, segment_queue.qsize())
+
+    def _flush_pending_main(force: bool = False) -> None:
+        nonlocal queue_len_peak
+        with pending_lock:
+            if pending_main["item"] is None:
+                return
+            if force or segment_queue.qsize() == 0:
+                segment_queue.put(pending_main["item"])
+                pending_main["item"] = None
+                backpressure_stats["pending_enqueued"] += 1
+                queue_len_peak = max(queue_len_peak, segment_queue.qsize())
 
     with requests.Session() as session:
         prod_thread = Thread(target=producer, daemon=True)
@@ -378,7 +405,8 @@ def run_once(run_idx: int | None = None) -> dict:
     print(
         prefix
         + "ttfa_s=%.3f first_audio_s=%.3f total_s=%.3f audio_s=%.3f "
-        "chunks=%d queue_len_peak=%d flush_punct=%d flush_len=%d starter=%d stop=%s failed=%d"
+        "chunks=%d queue_len_peak=%d flush_punct=%d flush_len=%d starter=%d "
+        "bp_overwrite=%d bp_enqueued=%d stop=%s failed=%d"
         % (
             first_audio_s,
             first_audio_s,
@@ -389,6 +417,8 @@ def run_once(run_idx: int | None = None) -> dict:
             flush_stats["punct"],
             flush_stats["len"],
             flush_stats["starter"],
+            backpressure_stats["pending_overwrite"],
+            backpressure_stats["pending_enqueued"],
             str(stop_event.is_set()).lower(),
             failed,
         )
@@ -404,6 +434,8 @@ def run_once(run_idx: int | None = None) -> dict:
         "stopped": stop_event.is_set(),
         "failed": failed,
         "queue_len_peak": queue_len_peak,
+        "bp_overwrite": backpressure_stats["pending_overwrite"],
+        "bp_enqueued": backpressure_stats["pending_enqueued"],
     }
 
 
