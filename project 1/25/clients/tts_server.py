@@ -143,6 +143,11 @@ TTS_DEEP_STREAM_PACKET_TRACE = os.environ.get("TTS_DEEP_STREAM_PACKET_TRACE", "0
     "true",
     "yes",
 )
+TTS_DEEP_STREAM_PACKET1_TRACE = os.environ.get("TTS_DEEP_STREAM_PACKET1_TRACE", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 TTS_DEEP_STREAM_DECODE_EVERY_N = int(os.environ.get("TTS_DEEP_STREAM_DECODE_EVERY_N", "1"))
 TTS_DEEP_STREAM_DECODER_SYNC = os.environ.get("TTS_DEEP_STREAM_DECODER_SYNC", "0").lower() in (
     "1",
@@ -169,6 +174,7 @@ TTS_DEEP_STREAM_OFFLINE_FROM_CODES = os.environ.get("TTS_DEEP_STREAM_OFFLINE_FRO
 )
 TTS_DEEP_STREAM_SILENCE_RMS = float(os.environ.get("TTS_DEEP_STREAM_SILENCE_RMS", "0.003"))
 TTS_DEEP_STREAM_SILENCE_PACKETS = int(os.environ.get("TTS_DEEP_STREAM_SILENCE_PACKETS", "6"))
+TTS_DEEP_STREAM_SILENCE_PACKETS_P1 = int(os.environ.get("TTS_DEEP_STREAM_SILENCE_PACKETS_P1", "0"))
 TTS_DEEP_STREAM_SEGMENT = os.environ.get("TTS_DEEP_STREAM_SEGMENT", "0").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_MAX_SEC_PER_CHAR = float(os.environ.get("TTS_DEEP_STREAM_MAX_SEC_PER_CHAR", "0.35"))
 TTS_DEEP_STREAM_MAX_SEC_MIN = float(os.environ.get("TTS_DEEP_STREAM_MAX_SEC_MIN", "4.0"))
@@ -373,37 +379,224 @@ def _percentile(values: list[float], p: float) -> float:
     return d0 + d1
 
 
+class _PhaseSync:
+    def __init__(self) -> None:
+        self._pause_request = Event()
+        self._paused = Event()
+        self._resume = Event()
+        self._done = Event()
+        self._lock = Lock()
+        self._pause_event: Optional[torch.cuda.Event] = None
+        self._resume_event: Optional[torch.cuda.Event] = None
+
+    def request_pause(self) -> None:
+        if self._done.is_set():
+            return
+        self._pause_request.set()
+
+    def should_pause(self) -> bool:
+        return self._pause_request.is_set() and not self._done.is_set()
+
+    def mark_paused(self, pause_event: Optional[torch.cuda.Event]) -> None:
+        if self._done.is_set():
+            return
+        with self._lock:
+            self._pause_event = pause_event
+        self._paused.set()
+
+    def wait_for_pause(self, timeout: Optional[float] = None) -> bool:
+        if self._done.is_set():
+            return False
+        return self._paused.wait(timeout)
+
+    def get_pause_event(self) -> Optional[torch.cuda.Event]:
+        with self._lock:
+            return self._pause_event
+
+    def resume(self, resume_event: Optional[torch.cuda.Event]) -> None:
+        if self._done.is_set():
+            return
+        with self._lock:
+            self._resume_event = resume_event
+        self._pause_request.clear()
+        self._resume.set()
+
+    def wait_for_resume(self) -> Optional[torch.cuda.Event]:
+        if self._done.is_set():
+            return None
+        self._resume.wait()
+        with self._lock:
+            resume_event = self._resume_event
+            self._resume_event = None
+            self._pause_event = None
+        self._resume.clear()
+        self._paused.clear()
+        return resume_event
+
+    def mark_done(self) -> None:
+        self._done.set()
+        self._pause_request.clear()
+        self._resume.set()
+        self._paused.set()
+
+
+class _Packet1Sampler:
+    def __init__(self, req_tag: str, log_interval_s: float = 1.0) -> None:
+        self.req_tag = req_tag
+        self.log_interval_s = log_interval_s
+        self._lock = Lock()
+        self._last_prod_ts = 0.0
+        self._last_cons_ts = 0.0
+        self._frames_emitted = 0
+        self._decode_calls = 0
+        self._packet_idx = 0
+
+    def update_frames_emitted(self, value: int) -> None:
+        with self._lock:
+            self._frames_emitted = int(value)
+
+    def increment_decode_calls(self) -> int:
+        with self._lock:
+            self._decode_calls += 1
+            return self._decode_calls
+
+    def next_packet_idx(self) -> int:
+        with self._lock:
+            self._packet_idx += 1
+            return self._packet_idx
+
+    def _should_log_prod(self) -> bool:
+        now = time.time()
+        with self._lock:
+            if now - self._last_prod_ts < self.log_interval_s:
+                return False
+            self._last_prod_ts = now
+        return True
+
+    def _should_log_cons(self) -> bool:
+        now = time.time()
+        with self._lock:
+            if now - self._last_cons_ts < self.log_interval_s:
+                return False
+            self._last_cons_ts = now
+        return True
+
+    def log_prod(self, put_ms: float, qsize: int) -> None:
+        if not self._should_log_prod():
+            return
+        with self._lock:
+            frames_emitted = self._frames_emitted
+        print(
+            f"[P1_PROD] req_tag={self.req_tag} put_ms={put_ms:.3f} "
+            f"qsize={qsize} frames_emitted={frames_emitted}"
+        )
+        sys.stdout.flush()
+
+    def log_cons(self, get_ms: float, qsize: int) -> None:
+        if not self._should_log_cons():
+            return
+        with self._lock:
+            decode_calls = self._decode_calls
+        print(
+            f"[P1_CONS] req_tag={self.req_tag} get_ms={get_ms:.3f} "
+            f"qsize={qsize} decode_calls={decode_calls}"
+        )
+        sys.stdout.flush()
+
+    def log_packet_ready(self, pkt_idx: int, t_packet_ready: float) -> None:
+        print(
+            f"[P1_PKT] req_tag={self.req_tag} pkt_idx={pkt_idx} "
+            f"t_packet_ready={t_packet_ready:.6f}"
+        )
+        sys.stdout.flush()
+
+
 class _CodecStreamQueue:
-    def __init__(self, cancel_event: Event, idle_timeout_s: float = 0.0):
+    def __init__(
+        self,
+        cancel_event: Event,
+        idle_timeout_s: float = 0.0,
+        sync_mode: str = "",
+        phase_sync: Optional[_PhaseSync] = None,
+        packet1_sampler: Optional[_Packet1Sampler] = None,
+    ):
         self._q: Queue = Queue()
         self._closed = False
         self._cancel_event = cancel_event
         self._idle_timeout_s = idle_timeout_s
         self._last_activity = time.time()
+        self._sync_mode = sync_mode
+        self._phase_sync = phase_sync
+        self._packet1_sampler = packet1_sampler
+
+    def _safe_qsize(self) -> int:
+        try:
+            return int(self._q.qsize())
+        except Exception:
+            return -1
 
     def put(self, codes: torch.Tensor):
         if self._closed:
             return
         self._last_activity = time.time()
-        self._q.put(codes)
+        codes_event = None
+        if self._sync_mode in ("event", "phase") and torch.cuda.is_available():
+            try:
+                codes_event = torch.cuda.Event(enable_timing=False)
+                codes_event.record(torch.cuda.current_stream())
+            except Exception:
+                codes_event = None
+        payload = (codes, codes_event) if codes_event is not None else codes
+        t_put0 = time.perf_counter()
+        self._q.put(payload)
+        put_ms = (time.perf_counter() - t_put0) * 1000.0
+        if self._packet1_sampler is not None:
+            self._packet1_sampler.log_prod(put_ms, self._safe_qsize())
+        if self._phase_sync is not None and self._phase_sync.should_pause():
+            if codes_event is None and torch.cuda.is_available():
+                try:
+                    codes_event = torch.cuda.Event(enable_timing=False)
+                    codes_event.record(torch.cuda.current_stream())
+                except Exception:
+                    codes_event = None
+            self._phase_sync.mark_paused(codes_event)
+            resume_event = self._phase_sync.wait_for_resume()
+            if resume_event is not None and torch.cuda.is_available():
+                try:
+                    torch.cuda.current_stream().wait_event(resume_event)
+                except Exception:
+                    pass
 
     def close(self):
         if self._closed:
             return
         self._closed = True
         self._last_activity = time.time()
+        if self._phase_sync is not None:
+            self._phase_sync.mark_done()
         self._q.put(None)
 
     def __iter__(self):
         while True:
             if self._cancel_event.is_set():
+                if self._phase_sync is not None:
+                    self._phase_sync.mark_done()
                 break
             if self._idle_timeout_s > 0 and (time.time() - self._last_activity) > self._idle_timeout_s:
                 self._cancel_event.set()
+                if self._phase_sync is not None:
+                    self._phase_sync.mark_done()
                 break
             try:
+                t_get0 = time.perf_counter()
                 item = self._q.get(timeout=0.1)
+                get_ms = (time.perf_counter() - t_get0) * 1000.0
+                if self._packet1_sampler is not None:
+                    self._packet1_sampler.log_cons(get_ms, self._safe_qsize())
             except Empty:
+                if self._packet1_sampler is not None:
+                    get_ms = (time.perf_counter() - t_get0) * 1000.0
+                    self._packet1_sampler.log_cons(get_ms, self._safe_qsize())
                 continue
             self._last_activity = time.time()
             if item is None:
@@ -870,9 +1063,20 @@ def _ensure_deep_worker() -> Optional[_DeepCodeWorker]:
     return _deep_worker
 
 
-def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
+def _iter_deep_codes(
+    req: "TTSRequest",
+    cancel_event: Event,
+    phase_sync: Optional[_PhaseSync] = None,
+    packet1_sampler: Optional[_Packet1Sampler] = None,
+):
     if not TTS_DEEP_STREAM_PROCESS:
-        streamer = _CodecStreamQueue(cancel_event, idle_timeout_s=TTS_DEEP_STREAM_IDLE_TIMEOUT_S)
+        streamer = _CodecStreamQueue(
+            cancel_event,
+            idle_timeout_s=TTS_DEEP_STREAM_IDLE_TIMEOUT_S,
+            sync_mode=TTS_DEEP_STREAM_SYNC_MODE,
+            phase_sync=phase_sync,
+            packet1_sampler=packet1_sampler,
+        )
         gen_kwargs = _deep_gen_kwargs(req)
         seed = _get_request_seed(req)
 
@@ -1453,7 +1657,6 @@ def synthesize_stream(req: TTSRequest):
         first_chunk = next(gen)
     except StopIteration:
         gen = iter(())
-
     headers = {
         "X-Sample-Rate": str(sr),
         "X-PCM-Format": "s16le",
@@ -1538,6 +1741,33 @@ def _synthesize_stream_deep(req: TTSRequest):
             "pcm_samples_total": 0,
             "pcm_samples_max": 0,
         }
+        silence_packets_limit = TTS_DEEP_STREAM_SILENCE_PACKETS
+        if packet_tokens == 1:
+            silence_packets_limit = TTS_DEEP_STREAM_SILENCE_PACKETS_P1
+        packet1_sampler = None
+        packet1_enabled = packet_tokens == 1 and (
+            TTS_DEEP_STREAM_PACKET_TRACE or TTS_DEEP_STREAM_PACKET1_TRACE
+        )
+        if packet1_enabled:
+            packet1_sampler = _Packet1Sampler(request_tag)
+        packet_idx = 0
+        phase_sync = None
+        phase_supported = (
+            TTS_DEEP_STREAM_SYNC_MODE == "phase"
+            and not TTS_DEEP_STREAM_PROCESS
+            and not TTS_DEEP_STREAM_CODEGEN_BLOCKING
+            and TTS_DEEP_STREAM_DEVICE != "cpu"
+            and torch.cuda.is_available()
+            and TTS_DEEP_STREAM_CODEGEN_DEVICE == TTS_DEEP_STREAM_DEVICE
+        )
+        if TTS_DEEP_STREAM_SYNC_MODE == "phase" and not phase_supported:
+            print(
+                "[TTS_DEEP] phase sync disabled "
+                "requires process=0, non-blocking codegen, same GPU, and CUDA"
+            )
+            sys.stdout.flush()
+        if phase_supported and use_incremental:
+            phase_sync = _PhaseSync()
         if use_incremental:
             mode = TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER
             if mode not in ("cache", "window", "full"):
@@ -1566,6 +1796,10 @@ def _synthesize_stream_deep(req: TTSRequest):
             if TTS_DEEP_STREAM_METRICS:
                 decode_ms_list.append(ms)
 
+        def _note_packet1_decode() -> None:
+            if packet1_sampler is not None:
+                packet1_sampler.increment_decode_calls()
+
         def _record_metrics() -> None:
             if metrics["server_ttfa_ms"] < 0 and first_out is not None:
                 metrics["server_ttfa_ms"] = (first_out - t_req_in) * 1000.0
@@ -1575,7 +1809,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                 metrics["model_ttf_ms"] = (t_first_decode_done - t_before_generate) * 1000.0
 
         def _decode_with_sync(codes_tensor: torch.Tensor, codes_event=None) -> np.ndarray:
-            nonlocal incremental_state, decoder_stream, decoder_event_done
+            nonlocal incremental_state, decoder_stream, decoder_event_done, phase_sync
             if incremental_decoder is None or incremental_state is None:
                 raise RuntimeError("incremental decoder not initialized")
             if TTS_DEEP_STREAM_SYNC_MODE == "sync" and TTS_DEEP_STREAM_DEVICE != "cpu":
@@ -1583,11 +1817,40 @@ def _synthesize_stream_deep(req: TTSRequest):
                     torch.cuda.synchronize()
                 except Exception:
                     pass
-            if (
-                TTS_DEEP_STREAM_SYNC_MODE == "event"
+            use_event_stream = (
+                TTS_DEEP_STREAM_SYNC_MODE in ("event", "phase")
                 and TTS_DEEP_STREAM_DEVICE != "cpu"
                 and torch.cuda.is_available()
-            ):
+            )
+            pre_conv_hook = None
+            post_conv_hook = None
+            if TTS_DEEP_STREAM_SYNC_MODE == "phase" and phase_sync is not None:
+                def _pre_conv() -> None:
+                    phase_sync.request_pause()
+                    if not phase_sync.wait_for_pause():
+                        return
+                    pause_event = phase_sync.get_pause_event()
+                    if pause_event is None:
+                        return
+                    try:
+                        torch.cuda.current_stream().wait_event(pause_event)
+                    except Exception:
+                        pass
+
+                def _post_conv() -> None:
+                    resume_event = None
+                    if torch.cuda.is_available():
+                        try:
+                            resume_event = torch.cuda.Event(enable_timing=False)
+                            resume_event.record(torch.cuda.current_stream())
+                        except Exception:
+                            resume_event = None
+                    phase_sync.resume(resume_event)
+
+                pre_conv_hook = _pre_conv
+                post_conv_hook = _post_conv
+
+            if use_event_stream:
                 if decoder_stream is None:
                     decoder_stream = torch.cuda.Stream()
                 if decoder_event_done is None:
@@ -1605,7 +1868,10 @@ def _synthesize_stream_deep(req: TTSRequest):
                         except Exception:
                             pass
                     audio_np, _state = incremental_decoder.decode_incremental(
-                        codes_tensor, incremental_state
+                        codes_tensor,
+                        incremental_state,
+                        pre_conv_hook=pre_conv_hook,
+                        post_conv_hook=post_conv_hook,
                     )
                     decoder_event_done.record(decoder_stream)
                 try:
@@ -1614,7 +1880,10 @@ def _synthesize_stream_deep(req: TTSRequest):
                     pass
             else:
                 audio_np, _state = incremental_decoder.decode_incremental(
-                    codes_tensor, incremental_state
+                    codes_tensor,
+                    incremental_state,
+                    pre_conv_hook=pre_conv_hook,
+                    post_conv_hook=post_conv_hook,
                 )
             incremental_state = _state
             return audio_np
@@ -1632,6 +1901,7 @@ def _synthesize_stream_deep(req: TTSRequest):
             if t_first_decode_done is None:
                 t_first_decode_done = t_decode_done
             _record_decode((t_decode_done - t_decode) * 1000.0)
+            _note_packet1_decode()
             if TTS_DEEP_STREAM_PACKET_TRACE:
                 packet_trace["decode_calls"] += 1
                 packet_trace["codes_frames_max"] = max(packet_trace["codes_frames_max"], int(codes_tensor.shape[0]))
@@ -1652,7 +1922,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                         emit_audio = incremental_tail
                         incremental_tail = np.zeros((0,), dtype=np.float32)
                     incremental_emitted += len(emit_audio)
-                    if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                    if silence_packets_limit > 0:
                         rms = float(np.sqrt(np.mean(emit_audio**2))) if emit_audio.size > 0 else 0.0
                         if rms < TTS_DEEP_STREAM_SILENCE_RMS:
                             silence_packets += 1
@@ -1728,7 +1998,12 @@ def _synthesize_stream_deep(req: TTSRequest):
                     if TTS_DEEP_STREAM_CODEGEN_BLOCKING:
                         codes_iter = _generate_codes_blocking(gen_req)
                     else:
-                        codes_iter = _iter_deep_codes(gen_req, cancel_event)
+                        codes_iter = _iter_deep_codes(
+                            gen_req,
+                            cancel_event,
+                            phase_sync=phase_sync,
+                            packet1_sampler=packet1_sampler,
+                        )
                     codes_iter = iter(codes_iter)
                     while True:
                         t_wait = time.time()
@@ -1736,6 +2011,9 @@ def _synthesize_stream_deep(req: TTSRequest):
                             codes = next(codes_iter)
                         except StopIteration:
                             break
+                        if packet1_sampler is not None and TTS_DEEP_STREAM_PROCESS:
+                            wait_ms = (time.time() - t_wait) * 1000.0
+                            packet1_sampler.log_cons(wait_ms, -1)
                         if TTS_DEEP_STREAM_PACKET_TRACE:
                             packet_trace["queue_wait_ms"] += (time.time() - t_wait) * 1000.0
                         if _check_deadline():
@@ -1746,7 +2024,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                         if isinstance(codes, tuple) and len(codes) == 2:
                             codes, codes_event = codes
                         if (
-                            TTS_DEEP_STREAM_SYNC_MODE == "event"
+                            TTS_DEEP_STREAM_SYNC_MODE in ("event", "phase")
                             and codes_event is not None
                             and TTS_DEEP_STREAM_DEVICE != "cpu"
                             and torch.cuda.is_available()
@@ -1765,7 +2043,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                         if TTS_DEEP_STREAM_DEVICE != "cpu":
                             codes = codes.to(TTS_DEEP_STREAM_DEVICE)
                         if (
-                            TTS_DEEP_STREAM_SYNC_MODE == "event"
+                            TTS_DEEP_STREAM_SYNC_MODE in ("event", "phase")
                             and TTS_DEEP_STREAM_DEVICE != "cpu"
                             and torch.cuda.is_available()
                         ):
@@ -1778,6 +2056,8 @@ def _synthesize_stream_deep(req: TTSRequest):
                         packet_event = codes_event
                         for frame in codes:
                             total_frames += 1
+                            if packet1_sampler is not None:
+                                packet1_sampler.update_frames_emitted(total_frames)
                             if max_frames > 0 and total_frames > max_frames:
                                 cancel_event.set()
                                 break
@@ -1787,6 +2067,9 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     continue
                                 codes_tensor = torch.stack(packet_buf, dim=0)
                                 packet_buf.clear()
+                                if packet1_sampler is not None:
+                                    packet_idx += 1
+                                    packet1_sampler.log_packet_ready(packet_idx, time.time())
                                 packet_event_local = packet_event
                                 if decode_every > 1:
                                     decode_every_buf.append(codes_tensor)
@@ -1813,7 +2096,12 @@ def _synthesize_stream_deep(req: TTSRequest):
                                 yield from _decode_incremental_codes(
                                     codes_tensor, codes_event=packet_event_local
                                 )
-                                if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                                if silence_packets_limit > 0 and silence_packets >= silence_packets_limit:
+                                    print(
+                                        f"[TTS_DEEP] req_tag={request_tag} cancel_reason=silence "
+                                        f"packets={silence_packets} limit={silence_packets_limit}"
+                                    )
+                                    sys.stdout.flush()
                                     cancel_event.set()
                                     break
                                 continue
@@ -1840,7 +2128,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                 t_first_decode_done = t_decode_done
                             _record_decode((t_decode_done - t_decode) * 1000.0)
                             audio_np = wavs[0]
-                            if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                            if silence_packets_limit > 0:
                                 rms = float(np.sqrt(np.mean(audio_np**2))) if audio_np.size > 0 else 0.0
                                 if rms < TTS_DEEP_STREAM_SILENCE_RMS:
                                     silence_packets += 1
@@ -1870,7 +2158,14 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     sys.stdout.flush()
                                 yield chunk
                             frames_emitted += new_frames
-                            if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                            if packet1_sampler is not None:
+                                packet1_sampler.update_frames_emitted(frames_emitted)
+                            if silence_packets_limit > 0 and silence_packets >= silence_packets_limit:
+                                print(
+                                    f"[TTS_DEEP] req_tag={request_tag} cancel_reason=silence "
+                                    f"packets={silence_packets} limit={silence_packets_limit}"
+                                )
+                                sys.stdout.flush()
                                 cancel_event.set()
                                 break
                             continue
@@ -1909,6 +2204,8 @@ def _synthesize_stream_deep(req: TTSRequest):
                             if t_first_decode_done is None:
                                 t_first_decode_done = t_decode_done
                             _record_decode((t_decode_done - t_decode) * 1000.0)
+                            if codes_tensor is not None:
+                                _note_packet1_decode()
                             if TTS_DEEP_STREAM_PACKET_TRACE and codes_tensor is not None:
                                 packet_trace["decode_calls"] += 1
                                 packet_trace["codes_frames_max"] = max(
@@ -1936,6 +2233,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                             if t_first_decode_done is None:
                                 t_first_decode_done = t_decode_done
                             _record_decode((t_decode_done - t_decode) * 1000.0)
+                            _note_packet1_decode()
                             if TTS_DEEP_STREAM_PACKET_TRACE:
                                 packet_trace["decode_calls"] += 1
                                 packet_trace["codes_frames_max"] = max(
@@ -1948,6 +2246,23 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     incremental_tail = audio_np
                                 else:
                                     incremental_tail = np.concatenate([incremental_tail, audio_np], axis=0)
+                        if incremental_decoder is not None and incremental_state is not None:
+                            t_decode = time.time()
+                            flush_audio, incremental_state = incremental_decoder.finalize(incremental_state)
+                            t_decode_done = time.time()
+                            if flush_audio.size > 0:
+                                _record_decode((t_decode_done - t_decode) * 1000.0)
+                                _note_packet1_decode()
+                                if TTS_DEEP_STREAM_PACKET_TRACE:
+                                    packet_trace["decode_calls"] += 1
+                                    packet_trace["pcm_samples_total"] += int(flush_audio.size)
+                                    packet_trace["pcm_samples_max"] = max(
+                                        packet_trace["pcm_samples_max"], int(flush_audio.size)
+                                    )
+                                if incremental_tail.size == 0:
+                                    incremental_tail = flush_audio
+                                else:
+                                    incremental_tail = np.concatenate([incremental_tail, flush_audio], axis=0)
                         remaining = (
                             incremental_state.expected_samples - incremental_emitted
                             if incremental_state is not None
@@ -1987,7 +2302,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     t_first_decode_done = t_decode_done
                                 _record_decode((t_decode_done - t_decode) * 1000.0)
                                 audio_np = wavs[0]
-                                if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                                if silence_packets_limit > 0:
                                     rms = float(np.sqrt(np.mean(audio_np**2))) if audio_np.size > 0 else 0.0
                                     if rms < TTS_DEEP_STREAM_SILENCE_RMS:
                                         silence_packets += 1
@@ -2003,7 +2318,12 @@ def _synthesize_stream_deep(req: TTSRequest):
                                         first_out = time.time()
                                         _record_metrics()
                                     yield chunk
-                                if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                                if silence_packets_limit > 0 and silence_packets >= silence_packets_limit:
+                                    print(
+                                        f"[TTS_DEEP] req_tag={request_tag} cancel_reason=silence "
+                                        f"packets={silence_packets} limit={silence_packets_limit}"
+                                    )
+                                    sys.stdout.flush()
                                     cancel_event.set()
                             frames_emitted = total_frames
 
@@ -2011,8 +2331,12 @@ def _synthesize_stream_deep(req: TTSRequest):
                         break
         except (GeneratorExit, BrokenPipeError, ConnectionResetError):
             cancel_event.set()
+            if phase_sync is not None:
+                phase_sync.mark_done()
             raise
         finally:
+            if phase_sync is not None:
+                phase_sync.mark_done()
             if cancel_event.is_set():
                 print(f"[TTS] request_cancelled=true t_req_in={t_req_in:.6f}")
                 sys.stdout.flush()
@@ -2117,6 +2441,9 @@ def _synthesize_stream_deep(req: TTSRequest):
     except StopIteration:
         gen = iter(())
 
+    silence_packets_header = TTS_DEEP_STREAM_SILENCE_PACKETS
+    if packet_tokens == 1:
+        silence_packets_header = TTS_DEEP_STREAM_SILENCE_PACKETS_P1
     headers = {
         "X-Sample-Rate": str(sr),
         "X-PCM-Format": "s16le",
@@ -2136,7 +2463,7 @@ def _synthesize_stream_deep(req: TTSRequest):
         ),
         "X-Left-Context": str(left_ctx_header),
         "X-Silence-Rms": str(TTS_DEEP_STREAM_SILENCE_RMS),
-        "X-Silence-Packets": str(TTS_DEEP_STREAM_SILENCE_PACKETS),
+        "X-Silence-Packets": str(silence_packets_header),
         "X-Model-TTFP-MS": f"{metrics['model_ttfp_ms']:.3f}",
         "X-Model-TTF-MS": f"{metrics['model_ttf_ms']:.3f}",
         "X-Server-TTFA-MS": f"{metrics['server_ttfa_ms']:.3f}",

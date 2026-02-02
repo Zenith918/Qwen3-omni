@@ -23,6 +23,7 @@ DEFAULT_ALIGN_MAX_MS = int(os.environ.get("TTS_ALIGN_MAX_MS", "500"))
 DEFAULT_POP_FRAME_MS = int(os.environ.get("TTS_POP_FRAME_MS", "20"))
 DEFAULT_RMS_CLIP = float(os.environ.get("TTS_RMS_CLIP_THRESHOLD", "0.4"))
 EXPECT_DEEP_STREAM = os.environ.get("TTS_EXPECT_DEEP_STREAM", "1").lower() in ("1", "true", "yes")
+EXPECTED_PACKET_TOKENS = int(os.environ.get("TTS_EXPECT_PACKET_TOKENS", "4"))
 WARMUP_RUNS = int(os.environ.get("TTS_WARMUP_RUNS", "2"))
 BASELINE_PATH = os.environ.get("TTS_REGRESSION_BASELINE", "")
 REPORT_PATH = os.environ.get("TTS_REPORT_PATH", "/workspace/project 1/25/REPORT.md")
@@ -383,8 +384,10 @@ def main() -> int:
                     )
                 if packet_tokens <= 0:
                     failures.append(f"{voice_id}/{text_id}: packet_tokens_missing")
-                elif packet_tokens != 4:
-                    failures.append(f"{voice_id}/{text_id}: packet_tokens={packet_tokens}")
+                elif packet_tokens != EXPECTED_PACKET_TOKENS:
+                    failures.append(
+                        f"{voice_id}/{text_id}: packet_tokens={packet_tokens} expected={EXPECTED_PACKET_TOKENS}"
+                    )
                 if model_ttf_ms < 0:
                     failures.append(
                         f"{voice_id}/{text_id}: model_ttf_missing"

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 import sys
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import torch
@@ -41,6 +41,7 @@ class DecoderState:
     decoder_post: Optional[torch.Tensor] = None
     expected_samples: int = 0
     emitted_samples: int = 0
+    codebook_dim: int = 0
 
 
 def _ensure_buffer(
@@ -152,7 +153,11 @@ class IncrementalDecoder:
         return state
 
     def decode_incremental(
-        self, audio_codes: torch.Tensor, state: DecoderState
+        self,
+        audio_codes: torch.Tensor,
+        state: DecoderState,
+        pre_conv_hook: Optional[Callable[[], None]] = None,
+        post_conv_hook: Optional[Callable[[], None]] = None,
     ) -> tuple[np.ndarray, DecoderState]:
         if audio_codes is None:
             return np.zeros((0,), dtype=np.float32), state
@@ -167,6 +172,7 @@ class IncrementalDecoder:
             codes = codes.unsqueeze(0)
         if codes.dim() != 3 or codes.shape[0] != 1:
             raise ValueError("decode_incremental expects shape (T, Q) or (1, T, Q)")
+        state.codebook_dim = int(codes.shape[-1])
         valid_frames = int((codes[:, :, 0] > 0).sum().item())
         state.expected_samples += valid_frames * self.decode_upsample_rate
         codes = codes.to(self.device).to(torch.long)
@@ -243,37 +249,48 @@ class IncrementalDecoder:
                 state.emitted_samples += out_len
                 return audio, state
 
-            hidden = hidden.permute(0, 2, 1)
+            if pre_conv_hook is not None:
+                pre_conv_hook()
 
-            for idx, blocks in enumerate(self.decoder.upsample):
-                trans = blocks[0]
-                hidden, state.upsample_trans_prev[idx] = _stream_transpose_conv(
-                    trans, hidden, state.upsample_trans_prev[idx]
-                )
-                convnext = blocks[1]
-                hidden, state.upsample_dwconv[idx] = _stream_convnext(convnext, hidden, state.upsample_dwconv[idx])
+            try:
+                hidden = hidden.permute(0, 2, 1)
 
-            decoder = self.decoder.decoder
-            hidden, state.decoder_pre = _stream_causal_conv(decoder[0], hidden, state.decoder_pre)
-
-            block_states = state.decoder_blocks
-            block_idx = 0
-            for block in decoder[1:-2]:
-                if not hasattr(block, "block"):
-                    continue
-                blk_state = block_states[block_idx]
-                block_idx += 1
-                # SnakeBeta then transposed conv
-                hidden = block.block[0](hidden)
-                hidden, blk_state.trans_prev = _stream_transpose_conv(block.block[1], hidden, blk_state.trans_prev)
-                for unit_idx, unit in enumerate(block.block[2:]):
-                    hidden, blk_state.residuals[unit_idx] = _stream_residual_unit(
-                        unit, hidden, blk_state.residuals[unit_idx]
+                for idx, blocks in enumerate(self.decoder.upsample):
+                    trans = blocks[0]
+                    hidden, state.upsample_trans_prev[idx] = _stream_transpose_conv(
+                        trans, hidden, state.upsample_trans_prev[idx]
+                    )
+                    convnext = blocks[1]
+                    hidden, state.upsample_dwconv[idx] = _stream_convnext(
+                        convnext, hidden, state.upsample_dwconv[idx]
                     )
 
-            hidden = decoder[-2](hidden)
-            hidden, state.decoder_post = _stream_causal_conv(decoder[-1], hidden, state.decoder_post)
-            hidden = hidden.clamp(min=-1, max=1).to(torch.float32)
+                decoder = self.decoder.decoder
+                hidden, state.decoder_pre = _stream_causal_conv(decoder[0], hidden, state.decoder_pre)
+
+                block_states = state.decoder_blocks
+                block_idx = 0
+                for block in decoder[1:-2]:
+                    if not hasattr(block, "block"):
+                        continue
+                    blk_state = block_states[block_idx]
+                    block_idx += 1
+                    # SnakeBeta then transposed conv
+                    hidden = block.block[0](hidden)
+                    hidden, blk_state.trans_prev = _stream_transpose_conv(
+                        block.block[1], hidden, blk_state.trans_prev
+                    )
+                    for unit_idx, unit in enumerate(block.block[2:]):
+                        hidden, blk_state.residuals[unit_idx] = _stream_residual_unit(
+                            unit, hidden, blk_state.residuals[unit_idx]
+                        )
+
+                hidden = decoder[-2](hidden)
+                hidden, state.decoder_post = _stream_causal_conv(decoder[-1], hidden, state.decoder_post)
+                hidden = hidden.clamp(min=-1, max=1).to(torch.float32)
+            finally:
+                if post_conv_hook is not None:
+                    post_conv_hook()
 
         audio = hidden.squeeze(0).squeeze(0).detach().cpu().numpy()
         if audio.ndim > 1:
@@ -281,3 +298,13 @@ class IncrementalDecoder:
         audio = audio.astype(np.float32)
         state.emitted_samples += len(audio)
         return audio, state
+
+    def finalize(self, state: DecoderState) -> tuple[np.ndarray, DecoderState]:
+        if state is None:
+            return np.zeros((0,), dtype=np.float32), state
+        codebook_dim = int(state.codebook_dim or 0)
+        if codebook_dim <= 0:
+            return np.zeros((0,), dtype=np.float32), state
+        # Push a zero frame to flush transpose-conv overlap at stream end.
+        dummy_codes = torch.zeros((1, codebook_dim), dtype=torch.long)
+        return self.decode_incremental(dummy_codes, state)

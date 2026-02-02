@@ -136,6 +136,34 @@ Q39b (event-based minimal sync):
 - Optional: `python3 "tmp_codes_analysis.py" --runs-json "output/debug/q39b_event_long.json" --packet-tokens 4 --compare`
 - Expectation: hash_unique=1 and first_diff_frame=-1 if event sync eliminates drift
 
+### Phase overlap (SYNC_MODE=phase)
+
+Goal: keep pre_transformer overlapped, but add a narrow barrier around conv/upsample.
+
+Requirements:
+- `TTS_DEEP_STREAM_PROCESS=0` (same process)
+- `TTS_DEEP_STREAM_CODEGEN_BLOCKING=0` (non-blocking codegen)
+- `TTS_DEEP_STREAM_SYNC_MODE=phase`
+- Same GPU for codegen/decoder (`TTS_DEEP_STREAM_DEVICE` == `TTS_DEEP_STREAM_CODEGEN_DEVICE`)
+
+Start server (example):
+- `TTS_DEEP_STREAM_SYNC_MODE=phase TTS_DEEP_STREAM_PROCESS=0 TTS_DEEP_STREAM_CODEGEN_BLOCKING=0 ... python3 "clients/tts_server.py"`
+- Confirm log does NOT print: `phase sync disabled ...`
+
+Run tests:
+- Warm-up: `python3 "clients/tts_codes_dump.py" --text-id long_03 --count 1`
+- 10-run timing:
+  - `python3 "tmp_ttfa_runs.py" --text-id long_03 --count 10 --out "output/debug/phase_long.json"`
+  - `python3 "tmp_ttfa_runs.py" --text-id short_01 --count 10 --out "output/debug/phase_short.json"`
+- Hash check:
+  - `python3 "tmp_codes_analysis.py" --runs-json "output/debug/phase_long.json" --packet-tokens 4 --compare"`
+  - `python3 "tmp_codes_analysis.py" --runs-json "output/debug/phase_short.json" --packet-tokens 4 --compare"`
+- Optional wav: `python3 "clients/tts_regression_suite.py" --texts "clients/texts_p0_base.json" --voices "clients/voices_base.json" --out-root "output/regression_phase"`
+
+Acceptance:
+- `hash_unique=1` for 10-run
+- TTFA P50 better than event sync (target ~350ms level)
+
 ### Packet=1 anomaly (Q41–Q43)
 
 Q41 (packet trace):
