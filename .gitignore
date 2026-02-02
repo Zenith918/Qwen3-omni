@@ -21,7 +21,8 @@ vllm-omni/
 运行/
 
 # Logs / outputs
-# (kept in git for验收)
+output/
+**/output/**
 
 # Third-party clones
 **/third_party/

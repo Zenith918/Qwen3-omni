@@ -1,2 +1,0 @@
-{'ts': 1769480318.1832387, 'error': "HTTPConnectionPool(host='127.0.0.1', port=9000): Read timed out. (read timeout=60.0)", 'text': '你好，我是你的语音助手。', 'length': 12}
-{'ts': 1769480378.2504737, 'error': "HTTPConnectionPool(host='127.0.0.1', port=9000): Read timed out. (read timeout=60.0)", 'text': '你好，我是你的语音助手。', 'length': 12}
