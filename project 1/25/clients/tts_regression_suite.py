@@ -12,11 +12,12 @@ import numpy as np
 import requests
 import soundfile as sf
 
-DEFAULT_TEXTS_PATH = os.path.join(os.path.dirname(__file__), "texts.json")
+DEFAULT_TEXTS_PATH = os.path.join(os.path.dirname(__file__), "texts_p0_base.json")
 DEFAULT_OUT_ROOT = "/workspace/project 1/25/output/regression"
 DEFAULT_STREAM_URL = os.environ.get("TTS_STREAM_URL", "http://127.0.0.1:9000/tts/stream")
 DEFAULT_OFFLINE_URL = os.environ.get("TTS_OFFLINE_URL", "http://127.0.0.1:9000/synthesize")
-DEFAULT_TIMEOUT_S = float(os.environ.get("TTS_TIMEOUT_S", "120"))
+DEFAULT_STREAM_TIMEOUT_S = float(os.environ.get("TTS_STREAM_TIMEOUT_S", os.environ.get("TTS_TIMEOUT_S", "120")))
+DEFAULT_OFFLINE_TIMEOUT_S = float(os.environ.get("TTS_OFFLINE_TIMEOUT_S", "600"))
 DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("TTS_MAX_NEW_TOKENS", "2048"))
 DEFAULT_ALIGN_MAX_MS = int(os.environ.get("TTS_ALIGN_MAX_MS", "500"))
 DEFAULT_POP_FRAME_MS = int(os.environ.get("TTS_POP_FRAME_MS", "20"))
@@ -68,7 +69,6 @@ def load_voices(voices_path) -> list[dict]:
         data = json.loads(env_json)
         return data.get("voices") if isinstance(data, dict) else data
     return [
-        {"id": "custom", "task_type": "CustomVoice", "speaker": "vivian", "language": "Chinese", "instruct": ""},
         {"id": "base", "task_type": "Base", "speaker": "serena", "language": "Chinese", "instruct": ""},
     ]
 
@@ -180,9 +180,29 @@ def audio_health(audio: np.ndarray, rms_clip: float) -> tuple[bool, dict]:
     return True, {"rms": rms, "peak": peak, "reason": "ok"}
 
 
+def _parse_float_header(headers: dict, key: str) -> float:
+    raw = headers.get(key)
+    if raw is None:
+        return -1.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return -1.0
+
+
+def _parse_int_header(headers: dict, key: str) -> int:
+    raw = headers.get(key)
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
 def run_offline(offline_url: str, payload: dict, out_path: str) -> tuple[np.ndarray, int, float]:
     t_start = time.time()
-    resp = requests.post(offline_url, json=payload, timeout=(10, DEFAULT_TIMEOUT_S))
+    resp = requests.post(offline_url, json=payload, timeout=(10, DEFAULT_OFFLINE_TIMEOUT_S))
     resp.raise_for_status()
     with open(out_path, "wb") as f:
         f.write(resp.content)
@@ -198,9 +218,10 @@ def run_stream(stream_url: str, payload: dict, out_path: str) -> dict:
     first_chunk = None
     pcm_chunks: list[bytes] = []
     headers = {}
-    with requests.post(stream_url, json=payload, stream=True, timeout=(10, DEFAULT_TIMEOUT_S)) as resp:
+    with requests.post(stream_url, json=payload, stream=True, timeout=(10, DEFAULT_STREAM_TIMEOUT_S)) as resp:
         resp.raise_for_status()
         headers = dict(resp.headers)
+        headers_lower = {k.lower(): v for k, v in headers.items()}
         sr = int(resp.headers.get("x-sample-rate", "24000"))
         with wave.open(out_path, "wb") as wf:
             wf.setnchannels(1)
@@ -226,6 +247,13 @@ def run_stream(stream_url: str, payload: dict, out_path: str) -> dict:
         "rtf": rtf,
         "total_s": t_end - t_start,
         "headers": headers,
+        "headers_lower": headers_lower,
+        "model_ttfp_ms": _parse_float_header(headers_lower, "x-model-ttfp-ms"),
+        "model_ttf_ms": _parse_float_header(headers_lower, "x-model-ttf-ms"),
+        "server_ttfa_ms": _parse_float_header(headers_lower, "x-server-ttfa-ms"),
+        "deep_stream_impl": str(headers_lower.get("x-deep-stream-impl", "")).lower(),
+        "packet_tokens": _parse_int_header(headers_lower, "x-packet-tokens"),
+        "left_context": _parse_int_header(headers_lower, "x-left-context"),
     }
 
 
@@ -331,14 +359,36 @@ def main() -> int:
 
             stream_audio = stream_result["audio"]
             stream_sr = stream_result["sr"]
-            ttfa_ms = stream_result["ttfa_ms"]
+            e2e_ttfa_ms = stream_result["ttfa_ms"]
+            ttfa_ms = e2e_ttfa_ms
             rtf = stream_result["rtf"]
             headers = stream_result["headers"]
+            headers_lower = stream_result["headers_lower"]
+            model_ttfp_ms = stream_result["model_ttfp_ms"]
+            model_ttf_ms = stream_result["model_ttf_ms"]
+            server_ttfa_ms = stream_result["server_ttfa_ms"]
+            deep_stream_impl = stream_result["deep_stream_impl"]
+            packet_tokens = stream_result["packet_tokens"]
+            left_context = stream_result["left_context"]
 
             if EXPECT_DEEP_STREAM:
-                deep_header = str(headers.get("x-deep-stream", "")).lower()
+                deep_header = str(headers_lower.get("x-deep-stream", "")).lower()
                 if deep_header not in ("true", "1", "yes"):
                     failures.append(f"{voice_id}/{text_id}: deep_stream_header_missing")
+                if not deep_stream_impl:
+                    failures.append(f"{voice_id}/{text_id}: deep_stream_impl_missing")
+                elif deep_stream_impl != "paper":
+                    failures.append(
+                        f"{voice_id}/{text_id}: deep_stream_impl={deep_stream_impl}"
+                    )
+                if packet_tokens <= 0:
+                    failures.append(f"{voice_id}/{text_id}: packet_tokens_missing")
+                elif packet_tokens != 4:
+                    failures.append(f"{voice_id}/{text_id}: packet_tokens={packet_tokens}")
+                if model_ttf_ms < 0:
+                    failures.append(
+                        f"{voice_id}/{text_id}: model_ttf_missing"
+                    )
 
             if offline_sr != stream_sr:
                 stream_audio = resample_linear(stream_audio, stream_sr, offline_sr)
@@ -373,6 +423,10 @@ def main() -> int:
                 "pop_click_score": pop_score,
                 "duration_diff_ms": duration_diff_ms,
                 "ttfa_ms": ttfa_ms,
+                "e2e_ttfa_ms": e2e_ttfa_ms,
+                "model_ttfp_ms": model_ttfp_ms,
+                "model_ttf_ms": model_ttf_ms,
+                "server_ttfa_ms": server_ttfa_ms,
                 "rtf": rtf,
                 "offset_samples": offset,
                 "stream_rms": stream_health.get("rms", 0.0),
@@ -380,6 +434,9 @@ def main() -> int:
                 "offline_rms": offline_health.get("rms", 0.0),
                 "offline_peak": offline_health.get("peak", 0.0),
                 "offline_total_s": offline_total,
+                "deep_stream_impl": deep_stream_impl,
+                "packet_tokens": packet_tokens,
+                "left_context": left_context,
             }
             write_json(metrics_path, metrics)
 
@@ -404,6 +461,10 @@ def main() -> int:
         "pop_click_score": calc_stats([c["metrics"]["pop_click_score"] for c in cases]),
         "duration_diff_ms": calc_stats([c["metrics"]["duration_diff_ms"] for c in cases], allow_negative=True),
         "ttfa_ms": calc_stats([c["metrics"]["ttfa_ms"] for c in cases]),
+        "e2e_ttfa_ms": calc_stats([c["metrics"]["e2e_ttfa_ms"] for c in cases]),
+        "model_ttfp_ms": calc_stats([c["metrics"]["model_ttfp_ms"] for c in cases]),
+        "model_ttf_ms": calc_stats([c["metrics"]["model_ttf_ms"] for c in cases]),
+        "server_ttfa_ms": calc_stats([c["metrics"]["server_ttfa_ms"] for c in cases]),
         "rtf": calc_stats([c["metrics"]["rtf"] for c in cases]),
     }
 
@@ -425,11 +486,13 @@ def main() -> int:
                 failures.append(
                     f"pop_click_score_p95_regress: {metrics_summary['pop_click_score']['p95']:.6f} > {base_pop * 1.2:.6f}"
                 )
-        base_ttfa = baseline.get("metrics", {}).get("ttfa_ms", {}).get("p50", -1.0)
+        base_ttfa = baseline.get("metrics", {}).get("e2e_ttfa_ms", {}).get("p50", -1.0)
+        if base_ttfa <= 0:
+            base_ttfa = baseline.get("metrics", {}).get("ttfa_ms", {}).get("p50", -1.0)
         if base_ttfa > 0:
-            if metrics_summary["ttfa_ms"]["p50"] > base_ttfa + 80.0:
+            if metrics_summary["e2e_ttfa_ms"]["p50"] > base_ttfa + 80.0:
                 failures.append(
-                    f"ttfa_p50_regress_ms: {metrics_summary['ttfa_ms']['p50']:.2f} > {base_ttfa + 80.0:.2f}"
+                    f"ttfa_p50_regress_ms: {metrics_summary['e2e_ttfa_ms']['p50']:.2f} > {base_ttfa + 80.0:.2f}"
                 )
 
     status = "PASS" if not failures else "FAIL"
@@ -486,6 +549,12 @@ def main() -> int:
         "stream_url": args.stream_url,
         "offline_url": args.offline_url,
         "metrics": metrics_summary,
+        "definitions": {
+            "model_ttfp_ms": "LM time to first packet tokens (server-side, before decode).",
+            "model_ttf_ms": "model_ttfp_ms + first packet decode time (server-side, paper-style).",
+            "server_ttfa_ms": "server request-in to first audio bytes written.",
+            "e2e_ttfa_ms": "client request start to first audio bytes received.",
+        },
         "cases": cases,
         "long_run": long_run,
         "status": status,
@@ -505,8 +574,9 @@ def main() -> int:
 
     report_line = (
         f"- 回归 {timestamp}: {status} "
-        f"TTFA_P50={metrics_summary['ttfa_ms']['p50']:.2f}ms "
-        f"TTFA_P95={metrics_summary['ttfa_ms']['p95']:.2f}ms "
+        f"E2E_TTFA_P50={metrics_summary['e2e_ttfa_ms']['p50']:.2f}ms "
+        f"E2E_TTFA_P95={metrics_summary['e2e_ttfa_ms']['p95']:.2f}ms "
+        f"MODEL_TTF_P50={metrics_summary['model_ttf_ms']['p50']:.2f}ms "
         f"RTF_P50={metrics_summary['rtf']['p50']:.3f} "
         f"MAE_P50={metrics_summary['mae_waveform']['p50']:.6f} "
         f"SNR_P50={metrics_summary['snr_db']['p50']:.2f}dB"
@@ -518,5 +588,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
 
 

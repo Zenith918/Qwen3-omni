@@ -1,0 +1,5 @@
+{
+  "voices": [
+    {"id": "base", "task_type": "Base", "speaker": "serena", "language": "Chinese", "instruct": ""}
+  ]
+}

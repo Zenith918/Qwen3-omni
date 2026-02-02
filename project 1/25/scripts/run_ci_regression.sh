@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="/workspace/project 1/25"
-TEXTS_PATH="${TTS_TEXTS_PATH:-$ROOT/clients/texts.json}"
-VOICES_PATH="${TTS_VOICES_PATH:-}"
+TEXTS_PATH="${TTS_TEXTS_PATH:-$ROOT/clients/texts_p0_base.json}"
+VOICES_PATH="${TTS_VOICES_PATH:-$ROOT/clients/voices_base.json}"
 OUT_ROOT="${TTS_REGRESSION_OUT:-$ROOT/output/regression}"
 STREAM_URL="${TTS_STREAM_URL:-http://127.0.0.1:9000/tts/stream}"
 OFFLINE_URL="${TTS_OFFLINE_URL:-http://127.0.0.1:9000/synthesize}"
@@ -14,5 +14,7 @@ if [ -n "$VOICES_PATH" ]; then
 fi
 
 python3 "$ROOT/clients/tts_regression_suite.py" "${ARGS[@]}"
+
+
 
 

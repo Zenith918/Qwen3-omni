@@ -3,6 +3,12 @@ import io
 import os
 import sys
 import time
+import hashlib
+import json
+import random
+import uuid
+
+from tts_incremental_decoder import IncrementalDecoder
 from collections import deque
 import multiprocessing as mp
 from typing import Generator, Optional
@@ -38,14 +44,137 @@ _starter_cache: dict[str, dict[str, object]] = {}
 TTS_DEEP_STREAM_ENABLE = os.environ.get("TTS_DEEP_STREAM_ENABLE", "0").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_PACKET_TOKENS = int(os.environ.get("TTS_DEEP_STREAM_PACKET_TOKENS", "4"))
 TTS_DEEP_STREAM_DEVICE = os.environ.get("TTS_DEEP_STREAM_DEVICE", "cuda:0")
+TTS_DEEP_STREAM_CODEGEN_DEVICE = os.environ.get("TTS_DEEP_STREAM_CODEGEN_DEVICE", TTS_DEEP_STREAM_DEVICE)
 TTS_DEEP_STREAM_MODEL_DIR = os.environ.get("TTS_DEEP_STREAM_MODEL_DIR", TTS_MODEL_DIR)
 TTS_DEEP_STREAM_TOKENIZER_DIR = os.environ.get("TTS_DEEP_STREAM_TOKENIZER_DIR", "")
-TTS_DEEP_STREAM_WINDOW_PACKETS = int(os.environ.get("TTS_DEEP_STREAM_WINDOW_PACKETS", "12"))
-TTS_DEEP_STREAM_OVERLAP_MS = int(os.environ.get("TTS_DEEP_STREAM_OVERLAP_MS", "200"))
 TTS_DEEP_STREAM_PROCESS = os.environ.get("TTS_DEEP_STREAM_PROCESS", "1").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_METRICS = os.environ.get("TTS_DEEP_STREAM_METRICS", "0").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_REQUEST_TIMEOUT_S = float(os.environ.get("TTS_DEEP_STREAM_REQUEST_TIMEOUT_S", "120"))
 TTS_DEEP_STREAM_CODE_TIMEOUT_S = float(os.environ.get("TTS_DEEP_STREAM_CODE_TIMEOUT_S", "120"))
+TTS_DEEP_STREAM_IDLE_TIMEOUT_S = float(
+    os.environ.get("TTS_DEEP_STREAM_IDLE_TIMEOUT_S", str(TTS_DEEP_STREAM_CODE_TIMEOUT_S))
+)
+TTS_DEEP_STREAM_LEFT_CONTEXT = int(os.environ.get("TTS_DEEP_STREAM_LEFT_CONTEXT", "25"))
+TTS_DEEP_STREAM_DETERMINISTIC = os.environ.get("TTS_DEEP_STREAM_DETERMINISTIC", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_DETERMINISTIC_POLICY = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_POLICY", "seeded"
+).strip().lower()
+TTS_DEEP_STREAM_SEED_MODE = os.environ.get("TTS_DEEP_STREAM_SEED_MODE", "content").strip().lower()
+TTS_DEEP_STREAM_DETERMINISTIC_STRICT = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_STRICT", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DETERMINISTIC_STRICT_DECODER = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_STRICT_DECODER", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DETERMINISTIC_SOFT = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_SOFT", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DETERMINISTIC_SOFT_DECODER = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_SOFT_DECODER", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_TRACE_TIMING = os.environ.get("TTS_DEEP_STREAM_TRACE_TIMING", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_VALIDATE_CODES = os.environ.get("TTS_DEEP_STREAM_VALIDATE_CODES", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_CLAMP_CODES = os.environ.get("TTS_DEEP_STREAM_CLAMP_CODES", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD_DECODER = os.environ.get(
+    "TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD_DECODER", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_CODEGEN_STRICT = os.environ.get("TTS_DEEP_STREAM_CODEGEN_STRICT", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_CODEGEN_CUBLAS = os.environ.get("TTS_DEEP_STREAM_CODEGEN_CUBLAS", "").strip()
+TTS_DEEP_STREAM_CODEGEN_STRICT_HARD = os.environ.get(
+    "TTS_DEEP_STREAM_CODEGEN_STRICT_HARD", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_CODEGEN_FP32 = os.environ.get("TTS_DEEP_STREAM_CODEGEN_FP32", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_DECODER_FP32 = os.environ.get("TTS_DEEP_STREAM_DECODER_FP32", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_PREFILL_PACKETS = int(os.environ.get("TTS_DEEP_STREAM_PREFILL_PACKETS", "0"))
+TTS_CODEGEN_DEBUG_TOPK = os.environ.get("TTS_CODEGEN_DEBUG_TOPK", "0").lower() in ("1", "true", "yes")
+TTS_CODEGEN_DEBUG_STEP_START = int(os.environ.get("TTS_CODEGEN_DEBUG_STEP_START", "4"))
+TTS_CODEGEN_DEBUG_STEP_END = int(
+    os.environ.get("TTS_CODEGEN_DEBUG_STEP_END", str(TTS_CODEGEN_DEBUG_STEP_START))
+)
+TTS_CODEGEN_DEBUG_TOPK_N = int(os.environ.get("TTS_CODEGEN_DEBUG_TOPK_N", "2"))
+TTS_DEEP_STREAM_CODEGEN_GENERATOR = os.environ.get("TTS_DEEP_STREAM_CODEGEN_GENERATOR", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_INCREMENTAL = os.environ.get("TTS_DEEP_STREAM_INCREMENTAL", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER = os.environ.get(
+    "TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER", "cache"
+).strip().lower()
+TTS_DEEP_STREAM_INCREMENTAL_HOLDBACK = int(os.environ.get("TTS_DEEP_STREAM_INCREMENTAL_HOLDBACK", "-1"))
+TTS_DEEP_STREAM_INCREMENTAL_TRIM_OFFLINE = os.environ.get(
+    "TTS_DEEP_STREAM_INCREMENTAL_TRIM_OFFLINE", "0"
+).lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_SYNC_MODE = os.environ.get("TTS_DEEP_STREAM_SYNC_MODE", "").strip().lower()
+TTS_DEEP_STREAM_DECODE_EVERY = int(os.environ.get("TTS_DEEP_STREAM_DECODE_EVERY", "1"))
+TTS_DEEP_STREAM_PACKET_TRACE = os.environ.get("TTS_DEEP_STREAM_PACKET_TRACE", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_DECODE_EVERY_N = int(os.environ.get("TTS_DEEP_STREAM_DECODE_EVERY_N", "1"))
+TTS_DEEP_STREAM_DECODER_SYNC = os.environ.get("TTS_DEEP_STREAM_DECODER_SYNC", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_PACKET_DEBUG = os.environ.get("TTS_PACKET_DEBUG", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DECODE_EVERY_N = int(os.environ.get("TTS_DEEP_STREAM_DECODE_EVERY_N", "1"))
+TTS_DEEP_STREAM_DECODER_SYNC = os.environ.get("TTS_DEEP_STREAM_DECODER_SYNC", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_PACKET_DEBUG = os.environ.get("TTS_PACKET_DEBUG", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_CODEGEN_BLOCKING = os.environ.get("TTS_DEEP_STREAM_CODEGEN_BLOCKING", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_OFFLINE_FROM_CODES = os.environ.get("TTS_DEEP_STREAM_OFFLINE_FROM_CODES", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TTS_DEEP_STREAM_SILENCE_RMS = float(os.environ.get("TTS_DEEP_STREAM_SILENCE_RMS", "0.003"))
+TTS_DEEP_STREAM_SILENCE_PACKETS = int(os.environ.get("TTS_DEEP_STREAM_SILENCE_PACKETS", "6"))
+TTS_DEEP_STREAM_SEGMENT = os.environ.get("TTS_DEEP_STREAM_SEGMENT", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_MAX_SEC_PER_CHAR = float(os.environ.get("TTS_DEEP_STREAM_MAX_SEC_PER_CHAR", "0.35"))
+TTS_DEEP_STREAM_MAX_SEC_MIN = float(os.environ.get("TTS_DEEP_STREAM_MAX_SEC_MIN", "4.0"))
+TTS_DEEP_STREAM_SEED = int(os.environ.get("TTS_DEEP_STREAM_SEED", "0"))
+TTS_CODE_DUMP_ENABLE = os.environ.get("TTS_CODE_DUMP_ENABLE", "0").lower() in ("1", "true", "yes")
+TTS_CODE_DUMP_DIR = os.environ.get("TTS_CODE_DUMP_DIR", "/workspace/project 1/25/output/code_dumps")
 
 _deep_model = None
 _deep_tokenizer = None
@@ -54,6 +183,133 @@ _deep_worker = None
 TTS_STARTER_CACHE_ENABLE = os.environ.get("TTS_STARTER_CACHE_ENABLE", "1").lower() in ("1", "true", "yes")
 TTS_STARTER_CACHE_TEXTS = os.environ.get("TTS_STARTER_CACHE_TEXTS", "嗯|好的|我在|我听到了|请说")
 TTS_STARTER_CACHE_MAX_NEW_TOKENS = int(os.environ.get("TTS_STARTER_CACHE_MAX_NEW_TOKENS", "256"))
+
+
+def _apply_backend_flags() -> None:
+    def _opt_bool(name: str) -> Optional[bool]:
+        raw = os.environ.get(name, "").strip().lower()
+        if raw == "":
+            return None
+        if raw in ("1", "true", "yes", "y"):
+            return True
+        if raw in ("0", "false", "no", "n"):
+            return False
+        return None
+
+    cudnn_benchmark = _opt_bool("TTS_CUDNN_BENCHMARK")
+    if cudnn_benchmark is not None:
+        torch.backends.cudnn.benchmark = cudnn_benchmark
+    cudnn_deterministic = _opt_bool("TTS_CUDNN_DETERMINISTIC")
+    if cudnn_deterministic is not None:
+        torch.backends.cudnn.deterministic = cudnn_deterministic
+    cudnn_allow_tf32 = _opt_bool("TTS_CUDNN_ALLOW_TF32")
+    if cudnn_allow_tf32 is not None:
+        try:
+            torch.backends.cudnn.allow_tf32 = cudnn_allow_tf32
+        except Exception:
+            pass
+    matmul_allow_tf32 = _opt_bool("TTS_CUDA_MATMUL_ALLOW_TF32")
+    if matmul_allow_tf32 is not None:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = matmul_allow_tf32
+        except Exception:
+            pass
+
+    if _opt_bool("TTS_CUDNN_TRACE"):
+        try:
+            print(
+                "[CUDNN] enabled="
+                f"{torch.backends.cudnn.enabled} "
+                f"available={torch.backends.cudnn.is_available()} "
+                f"version={torch.backends.cudnn.version()} "
+                f"benchmark={torch.backends.cudnn.benchmark} "
+                f"deterministic={torch.backends.cudnn.deterministic} "
+                f"allow_tf32={getattr(torch.backends.cudnn, 'allow_tf32', 'n/a')}"
+            )
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+def _set_global_seed(
+    seed: int,
+    strict: bool = False,
+    soft: bool = False,
+    single_thread: bool = False,
+    strict_hard: bool = False,
+) -> None:
+    if seed < 0:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if single_thread:
+        try:
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+    if strict or soft:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = False
+        except Exception:
+            pass
+        try:
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        except Exception:
+            pass
+        try:
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+        except Exception:
+            pass
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    if strict:
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=not strict_hard)
+        except TypeError:
+            torch.use_deterministic_algorithms(True)
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = False
+        except Exception:
+            pass
+    _apply_backend_flags()
+
+
+def _ensure_code_dump_dir() -> None:
+    if not TTS_CODE_DUMP_ENABLE:
+        return
+    os.makedirs(TTS_CODE_DUMP_DIR, exist_ok=True)
+
+
+def _dump_codes(request_tag: str, codes_tensor: torch.Tensor, meta: dict) -> None:
+    if not TTS_CODE_DUMP_ENABLE:
+        return
+    _ensure_code_dump_dir()
+    codes_np = codes_tensor.detach().cpu().numpy()
+    sha256 = hashlib.sha256(codes_np.tobytes()).hexdigest()
+    meta = dict(meta)
+    if codes_np.size > 0:
+        meta["min_code"] = int(codes_np.min())
+        meta["max_code"] = int(codes_np.max())
+        codebook_size = int(meta.get("codebook_size", 0) or 0)
+        if codebook_size > 0:
+            out_of_range = (codes_np < 0) | (codes_np >= codebook_size)
+            meta["out_of_range_count"] = int(out_of_range.sum())
+    meta.update(
+        {
+            "sha256": sha256,
+            "frames": int(codes_np.shape[0]),
+            "codebooks": int(codes_np.shape[1]) if codes_np.ndim > 1 else 1,
+        }
+    )
+    codes_path = os.path.join(TTS_CODE_DUMP_DIR, f"codes_{request_tag}.pt")
+    meta_path = os.path.join(TTS_CODE_DUMP_DIR, f"meta_{request_tag}.json")
+    torch.save(torch.from_numpy(codes_np), codes_path)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
 def _build_inputs(req: "TTSRequest") -> dict:
@@ -118,30 +374,38 @@ def _percentile(values: list[float], p: float) -> float:
 
 
 class _CodecStreamQueue:
-    def __init__(self, cancel_event: Event):
+    def __init__(self, cancel_event: Event, idle_timeout_s: float = 0.0):
         self._q: Queue = Queue()
         self._closed = False
         self._cancel_event = cancel_event
+        self._idle_timeout_s = idle_timeout_s
+        self._last_activity = time.time()
 
     def put(self, codes: torch.Tensor):
         if self._closed:
             return
+        self._last_activity = time.time()
         self._q.put(codes)
 
     def close(self):
         if self._closed:
             return
         self._closed = True
+        self._last_activity = time.time()
         self._q.put(None)
 
     def __iter__(self):
         while True:
             if self._cancel_event.is_set():
                 break
+            if self._idle_timeout_s > 0 and (time.time() - self._last_activity) > self._idle_timeout_s:
+                self._cancel_event.set()
+                break
             try:
                 item = self._q.get(timeout=0.1)
             except Empty:
                 continue
+            self._last_activity = time.time()
             if item is None:
                 break
             yield item
@@ -216,15 +480,94 @@ class _DeepCodeWorker:
 
 
 def _deep_code_worker_main(cmd_q, out_q, model_dir: str, device: str) -> None:
+    if TTS_DEEP_STREAM_CODEGEN_STRICT and TTS_DEEP_STREAM_CODEGEN_CUBLAS:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = TTS_DEEP_STREAM_CODEGEN_CUBLAS
     import torch
     from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts import Qwen3TTSModel
 
-    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    _set_global_seed(
+        TTS_DEEP_STREAM_SEED,
+        strict=TTS_DEEP_STREAM_CODEGEN_STRICT,
+        strict_hard=TTS_DEEP_STREAM_CODEGEN_STRICT_HARD,
+        soft=TTS_DEEP_STREAM_DETERMINISTIC_SOFT,
+        single_thread=TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD,
+    )
+    dtype = torch.float32 if device == "cpu" or TTS_DEEP_STREAM_CODEGEN_FP32 else torch.bfloat16
     model_kwargs = {"device_map": device, "dtype": dtype}
     try:
         model = Qwen3TTSModel.from_pretrained(model_dir, attn_implementation="flash_attention_2", **model_kwargs)
     except Exception:
         model = Qwen3TTSModel.from_pretrained(model_dir, attn_implementation="eager", **model_kwargs)
+    try:
+        model.model.eval()
+    except Exception:
+        pass
+    if TTS_CODEGEN_DEBUG_TOPK:
+        try:
+            import inspect
+            from vllm_omni.model_executor.models.qwen3_tts import modeling_qwen3_tts as m
+
+            orig_forward = m.Qwen3TTSTalkerForConditionalGeneration.forward
+
+            def _debug_forward(self, *args, **kwargs):
+                out = orig_forward(self, *args, **kwargs)
+                try:
+                    gen_step = kwargs.get("generation_step")
+                    if gen_step is None:
+                        return out
+                    if gen_step < TTS_CODEGEN_DEBUG_STEP_START or gen_step > TTS_CODEGEN_DEBUG_STEP_END:
+                        return out
+                    req_id = getattr(self, "_debug_request_id", None)
+                    if req_id is None:
+                        return out
+                    logged = getattr(self, "_debug_logged_steps", None)
+                    if logged is None:
+                        logged = set()
+                        self._debug_logged_steps = logged
+                    key = (req_id, int(gen_step))
+                    if key in logged:
+                        return out
+                    logged.add(key)
+                    logits = getattr(out, "logits", None)
+                    if logits is None or logits.numel() == 0:
+                        return out
+                    vec = logits[0, -1].detach().float().cpu()
+                    topk = torch.topk(vec, k=max(1, TTS_CODEGEN_DEBUG_TOPK_N))
+                    top1_id = int(topk.indices[0].item())
+                    top1_val = float(topk.values[0].item())
+                    top2_id = int(topk.indices[1].item()) if topk.values.numel() > 1 else -1
+                    top2_val = float(topk.values[1].item()) if topk.values.numel() > 1 else 0.0
+                    gap = top1_val - top2_val if top2_id >= 0 else 0.0
+                    seed = getattr(self, "_debug_seed", None)
+                    text_hash = getattr(self, "_debug_text_hash", "")
+                    autocast = torch.is_autocast_enabled()
+                    try:
+                        param_dtype = next(self.parameters()).dtype
+                    except Exception:
+                        param_dtype = "unknown"
+                    print(
+                        f"[CODEGEN_TOPK] req_id={req_id} step={int(gen_step)} "
+                        f"top1={top1_id} {top1_val:.6f} top2={top2_id} {top2_val:.6f} "
+                        f"gap={gap:.6f} seed={seed} text_hash={text_hash} "
+                        f"dtype={param_dtype} autocast={autocast}"
+                    )
+                    sys.stdout.flush()
+                except Exception as e:
+                    print(f"[CODEGEN_TOPK] failed to log: {e}")
+                    sys.stdout.flush()
+                return out
+
+            _debug_forward.__signature__ = inspect.signature(orig_forward)
+            m.Qwen3TTSTalkerForConditionalGeneration.forward = _debug_forward
+            try:
+                model_dtype = next(model.parameters()).dtype
+            except Exception:
+                model_dtype = "unknown"
+            print(f"[CODEGEN_DEBUG] model_dtype={model_dtype} device={device}")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[CODEGEN_DEBUG] install_failed err={e}")
+            sys.stdout.flush()
 
     class _MPCodecStreamer:
         def __init__(self, request_id: int):
@@ -254,7 +597,26 @@ def _deep_code_worker_main(cmd_q, out_q, model_dir: str, device: str) -> None:
         request_id = cmd.get("request_id", 0)
         payload = cmd.get("payload", {})
         try:
+            seed = payload.get("seed")
+            if seed is not None:
+                _set_global_seed(
+                    int(seed),
+                    strict=TTS_DEEP_STREAM_CODEGEN_STRICT,
+                    strict_hard=TTS_DEEP_STREAM_CODEGEN_STRICT_HARD,
+                    soft=TTS_DEEP_STREAM_DETERMINISTIC_SOFT,
+                    single_thread=TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD,
+                )
             streamer = _MPCodecStreamer(request_id)
+            gen_kwargs = payload.get("gen_kwargs") or {}
+            if TTS_CODEGEN_DEBUG_TOPK:
+                try:
+                    text = payload.get("text", "")
+                    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+                    model.model.talker._debug_request_id = request_id
+                    model.model.talker._debug_seed = seed
+                    model.model.talker._debug_text_hash = text_hash
+                except Exception:
+                    pass
             codes_list, _ = model.generate_custom_voice_codes(
                 text=payload.get("text", ""),
                 speaker=payload.get("speaker", "Vivian"),
@@ -263,6 +625,7 @@ def _deep_code_worker_main(cmd_q, out_q, model_dir: str, device: str) -> None:
                 codec_streamer=streamer,
                 max_new_tokens=payload.get("max_new_tokens", 2048),
                 non_streaming_mode=payload.get("non_streaming_mode", False),
+                **gen_kwargs,
             )
             codes_cpu_list = []
             for codes in codes_list:
@@ -271,6 +634,13 @@ def _deep_code_worker_main(cmd_q, out_q, model_dir: str, device: str) -> None:
                 else:
                     codes_cpu_list.append(codes)
             out_q.put({"type": "done", "request_id": request_id, "codes": codes_cpu_list})
+            if TTS_CODEGEN_DEBUG_TOPK:
+                try:
+                    model.model.talker._debug_request_id = None
+                    model.model.talker._debug_seed = None
+                    model.model.talker._debug_text_hash = None
+                except Exception:
+                    pass
         except Exception as e:
             out_q.put({"type": "error", "request_id": request_id, "error": str(e)})
 
@@ -312,22 +682,211 @@ def _split_text_stream(
     return segments
 
 
+def _deep_gen_kwargs(req: "TTSRequest") -> dict:
+    if not TTS_DEEP_STREAM_DETERMINISTIC:
+        return {}
+    if TTS_DEEP_STREAM_DETERMINISTIC_POLICY == "greedy":
+        return {
+            "do_sample": False,
+            "top_p": 1.0,
+            "repetition_penalty": 1.0,
+            "subtalker_dosample": False,
+            "subtalker_top_p": 1.0,
+        }
+    return {}
+
+
+def _stable_seed_from_text(req: "TTSRequest") -> int:
+    hasher = hashlib.sha256()
+    hasher.update(req.text.encode("utf-8"))
+    hasher.update((req.task_type or "").encode("utf-8"))
+    hasher.update((req.language or "").encode("utf-8"))
+    hasher.update((req.speaker or "").encode("utf-8"))
+    hasher.update((req.instruct or "").encode("utf-8"))
+    hasher.update(str(req.max_new_tokens).encode("utf-8"))
+    hasher.update(str(req.non_streaming_mode).encode("utf-8"))
+    return int(hasher.hexdigest()[:8], 16)
+
+
+def _get_request_seed(req: "TTSRequest") -> Optional[int]:
+    if not TTS_DEEP_STREAM_DETERMINISTIC:
+        return None
+    if req.seed is not None:
+        return int(req.seed)
+    mode = TTS_DEEP_STREAM_SEED_MODE
+    if mode == "fixed":
+        return int(TTS_DEEP_STREAM_SEED)
+    if mode == "random":
+        return random.randint(0, 2**31 - 1)
+    return _stable_seed_from_text(req)
+
+
+def _make_request_generator(seed: Optional[int], device: str) -> Optional[torch.Generator]:
+    if seed is None or not TTS_DEEP_STREAM_CODEGEN_GENERATOR:
+        return None
+    try:
+        gen = torch.Generator(device=device)
+        gen.manual_seed(int(seed))
+        return gen
+    except Exception:
+        return None
+
+
+def _normalize_codes_tensor(codes: torch.Tensor) -> torch.Tensor:
+    if codes.dim() == 3 and codes.shape[0] == 1:
+        codes = codes.squeeze(0)
+    if codes.dim() == 1:
+        codes = codes.unsqueeze(0)
+    if codes.dim() != 2:
+        raise ValueError(f"Unsupported codes shape: {tuple(codes.shape)}")
+    return codes
+
+
+def _get_codebook_size() -> int:
+    if _deep_tokenizer is None:
+        return 0
+    try:
+        return int(getattr(_deep_tokenizer.model.decoder.config, "codebook_size", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _sanitize_codes(codes: torch.Tensor) -> torch.Tensor:
+    codebook_size = _get_codebook_size()
+    if codebook_size <= 0:
+        return codes
+    try:
+        min_code = int(codes.min().item())
+        max_code = int(codes.max().item())
+    except Exception:
+        return codes
+    if min_code < 0 or max_code >= codebook_size:
+        if TTS_DEEP_STREAM_VALIDATE_CODES:
+            out_of_range = ((codes < 0) | (codes >= codebook_size)).sum().item()
+            print(
+                f"[TTS_CODES] out_of_range={int(out_of_range)} "
+                f"min={min_code} max={max_code} codebook={codebook_size}"
+            )
+            sys.stdout.flush()
+        if TTS_DEEP_STREAM_CLAMP_CODES:
+            codes = codes.clamp(0, codebook_size - 1)
+    return codes
+
+
+def _decode_codes_streaming(
+    codes: torch.Tensor,
+    packet_tokens: int,
+    left_context_frames: int,
+) -> tuple[np.ndarray, int]:
+    assert _deep_tokenizer is not None
+    codes = _normalize_codes_tensor(codes)
+    total = codes.shape[0]
+    out_chunks: list[np.ndarray] = []
+    idx = 0
+    while idx < total:
+        end = min(idx + packet_tokens, total)
+        ctx = min(left_context_frames, idx)
+        codes_chunk = codes[idx - ctx : end]
+        start_position = max(0, idx - ctx)
+        wavs, sr = _deep_tokenizer.decode_streaming(
+            codes_chunk, left_context_size=ctx, start_position=start_position
+        )
+        out_chunks.append(wavs[0])
+        idx = end
+    if out_chunks:
+        audio_np = np.concatenate(out_chunks, axis=0)
+    else:
+        audio_np = np.zeros((0,), dtype=np.float32)
+        sr = _deep_tokenizer.get_output_sample_rate()
+    return audio_np, sr
+
+
+def _decode_codes_incremental(
+    codes: torch.Tensor,
+    packet_tokens: int,
+) -> tuple[np.ndarray, int]:
+    assert _deep_tokenizer is not None
+    mode = TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER
+    if mode not in ("cache", "window", "full"):
+        mode = "cache"
+    decoder = IncrementalDecoder(_deep_tokenizer, device=TTS_DEEP_STREAM_DEVICE, transformer_mode=mode)
+    state = decoder.reset_state()
+    codes = _normalize_codes_tensor(codes)
+    total = codes.shape[0]
+    idx = 0
+    chunks: list[np.ndarray] = []
+    while idx < total:
+        end = min(idx + packet_tokens, total)
+        pcm, state = decoder.decode_incremental(codes[idx:end], state)
+        if pcm.size > 0:
+            chunks.append(pcm)
+        idx = end
+    if chunks:
+        audio_np = np.concatenate(chunks, axis=0)
+    else:
+        audio_np = np.zeros((0,), dtype=np.float32)
+    if state.expected_samples > 0 and len(audio_np) > state.expected_samples:
+        audio_np = audio_np[: state.expected_samples]
+    return audio_np, int(_deep_tokenizer.get_output_sample_rate())
+
+
+def _trim_trailing_silence(audio_np: np.ndarray, sr: int) -> np.ndarray:
+    if audio_np.size == 0:
+        return audio_np
+    if TTS_DEEP_STREAM_SILENCE_RMS <= 0:
+        return audio_np
+    win = max(1, int(sr * 0.2))
+    end = len(audio_np)
+    trimmed = 0
+    while end > win:
+        frame = audio_np[end - win : end]
+        rms = float(np.sqrt(np.mean(frame**2)))
+        if rms >= TTS_DEEP_STREAM_SILENCE_RMS:
+            break
+        end -= win
+        trimmed += win
+        if trimmed >= sr * 10:
+            break
+    return audio_np[:end]
+
+
+def _estimate_max_frames(text: str) -> int:
+    try:
+        sr = _deep_tokenizer.get_output_sample_rate()
+        upsample = _deep_tokenizer.get_decode_upsample_rate()
+        frames_per_sec = sr / float(upsample)
+    except Exception:
+        frames_per_sec = 12.5
+    max_sec = max(TTS_DEEP_STREAM_MAX_SEC_MIN, len(text.strip()) * TTS_DEEP_STREAM_MAX_SEC_PER_CHAR)
+    return int(max_sec * frames_per_sec)
+
+
 def _ensure_deep_worker() -> Optional[_DeepCodeWorker]:
     global _deep_worker
     if not TTS_DEEP_STREAM_PROCESS:
         return None
     if _deep_worker is None or not _deep_worker.is_alive():
-        _deep_worker = _DeepCodeWorker(TTS_DEEP_STREAM_MODEL_DIR, TTS_DEEP_STREAM_DEVICE)
+        _deep_worker = _DeepCodeWorker(TTS_DEEP_STREAM_MODEL_DIR, TTS_DEEP_STREAM_CODEGEN_DEVICE)
     return _deep_worker
 
 
 def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
     if not TTS_DEEP_STREAM_PROCESS:
-        streamer = _CodecStreamQueue(cancel_event)
+        streamer = _CodecStreamQueue(cancel_event, idle_timeout_s=TTS_DEEP_STREAM_IDLE_TIMEOUT_S)
+        gen_kwargs = _deep_gen_kwargs(req)
+        seed = _get_request_seed(req)
 
         def _generate_codes():
             assert _deep_model is not None
             try:
+                if seed is not None:
+                    _set_global_seed(
+                        seed,
+                        strict=TTS_DEEP_STREAM_CODEGEN_STRICT,
+                        strict_hard=TTS_DEEP_STREAM_CODEGEN_STRICT_HARD,
+                        soft=TTS_DEEP_STREAM_DETERMINISTIC_SOFT,
+                        single_thread=TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD,
+                    )
                 _deep_model.generate_custom_voice_codes(
                     text=req.text,
                     speaker=req.speaker,
@@ -336,6 +895,7 @@ def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
                     codec_streamer=streamer,
                     max_new_tokens=req.max_new_tokens,
                     non_streaming_mode=req.non_streaming_mode,
+                    **gen_kwargs,
                 )
             finally:
                 streamer.close()
@@ -351,6 +911,10 @@ def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
         return
     worker.drain_out()
     request_id = worker.next_request_id()
+    deadline = None
+    if TTS_DEEP_STREAM_CODE_TIMEOUT_S > 0:
+        deadline = time.time() + TTS_DEEP_STREAM_CODE_TIMEOUT_S
+    seed = _get_request_seed(req)
     payload = {
         "text": req.text,
         "speaker": req.speaker,
@@ -358,10 +922,16 @@ def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
         "instruct": req.instruct,
         "max_new_tokens": req.max_new_tokens,
         "non_streaming_mode": req.non_streaming_mode,
+        "gen_kwargs": _deep_gen_kwargs(req),
+        "seed": seed,
     }
     worker.send_generate(request_id, payload)
     while True:
         if cancel_event.is_set():
+            worker.abort()
+            break
+        if deadline is not None and time.time() > deadline:
+            cancel_event.set()
             worker.abort()
             break
         msg = worker.read_out(timeout=0.1)
@@ -380,7 +950,22 @@ def _iter_deep_codes(req: "TTSRequest", cancel_event: Event):
 
 def _generate_codes_blocking(req: "TTSRequest") -> list[torch.Tensor]:
     if not TTS_DEEP_STREAM_PROCESS:
+        gen_kwargs = _deep_gen_kwargs(req)
         assert _deep_model is not None
+        seed = _get_request_seed(req)
+        if seed is not None:
+            gen = _make_request_generator(seed, _deep_model.device if _deep_model is not None else "cpu")
+            if gen is not None:
+                gen_kwargs = dict(gen_kwargs)
+                gen_kwargs["generator"] = gen
+        if seed is not None:
+            _set_global_seed(
+                seed,
+                strict=TTS_DEEP_STREAM_CODEGEN_STRICT,
+                strict_hard=TTS_DEEP_STREAM_CODEGEN_STRICT_HARD,
+                soft=TTS_DEEP_STREAM_DETERMINISTIC_SOFT,
+                single_thread=TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD,
+            )
         codes_list, _ = _deep_model.generate_custom_voice_codes(
             text=req.text,
             speaker=req.speaker,
@@ -388,6 +973,7 @@ def _generate_codes_blocking(req: "TTSRequest") -> list[torch.Tensor]:
             instruct=req.instruct,
             max_new_tokens=req.max_new_tokens,
             non_streaming_mode=req.non_streaming_mode,
+            **gen_kwargs,
         )
         return codes_list
 
@@ -403,6 +989,8 @@ def _generate_codes_blocking(req: "TTSRequest") -> list[torch.Tensor]:
         "instruct": req.instruct,
         "max_new_tokens": req.max_new_tokens,
         "non_streaming_mode": req.non_streaming_mode,
+        "gen_kwargs": _deep_gen_kwargs(req),
+        "seed": _get_request_seed(req),
     }
     worker.send_generate(request_id, payload)
     codes_list = []
@@ -425,6 +1013,29 @@ def _generate_codes_blocking(req: "TTSRequest") -> list[torch.Tensor]:
     return codes_list
 
 
+def _collect_codes_streaming(req: "TTSRequest", max_frames: int) -> list[torch.Tensor]:
+    cancel_event = Event()
+    frames: list[torch.Tensor] = []
+    total_frames = 0
+    for codes in _iter_deep_codes(req, cancel_event):
+        if isinstance(codes, tuple) and len(codes) == 2:
+            codes = codes[0]
+        if not isinstance(codes, torch.Tensor):
+            continue
+        codes = _normalize_codes_tensor(codes.to(torch.long))
+        for frame in codes:
+            frames.append(frame)
+            total_frames += 1
+            if max_frames > 0 and total_frames >= max_frames:
+                cancel_event.set()
+                break
+        if cancel_event.is_set():
+            break
+    if not frames:
+        raise RuntimeError("No audio codes produced")
+    return [torch.stack(frames, dim=0)]
+
+
 class TTSRequest(BaseModel):
     text: str
     task_type: str = "CustomVoice"
@@ -433,12 +1044,19 @@ class TTSRequest(BaseModel):
     instruct: str = ""
     max_new_tokens: int = 2048
     non_streaming_mode: bool = False
+    seed: Optional[int] = None
 
 
 @app.on_event("startup")
 def _init_omni():
     global _omni, _sampling_params, _warmup_done
     if TTS_DEEP_STREAM_ENABLE:
+        _set_global_seed(
+            TTS_DEEP_STREAM_SEED,
+            strict=TTS_DEEP_STREAM_DETERMINISTIC_STRICT_DECODER,
+            soft=TTS_DEEP_STREAM_DETERMINISTIC_SOFT_DECODER,
+            single_thread=TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD_DECODER,
+        )
         _init_deep_stream_backend()
         if TTS_STARTER_CACHE_ENABLE:
             _prime_starter_cache()
@@ -506,7 +1124,11 @@ def _init_deep_stream_backend() -> None:
         candidate = os.path.join(TTS_DEEP_STREAM_MODEL_DIR, "speech_tokenizer")
         tokenizer_dir = candidate if os.path.isdir(candidate) else TTS_DEEP_STREAM_MODEL_DIR
 
-    dtype = torch.float32 if TTS_DEEP_STREAM_DEVICE == "cpu" else torch.bfloat16
+    dtype = (
+        torch.float32
+        if TTS_DEEP_STREAM_DEVICE == "cpu" or TTS_DEEP_STREAM_DECODER_FP32
+        else torch.bfloat16
+    )
     model_kwargs = {"device_map": TTS_DEEP_STREAM_DEVICE, "dtype": dtype}
     tok_kwargs = {"device_map": TTS_DEEP_STREAM_DEVICE, "dtype": dtype}
     if not TTS_DEEP_STREAM_PROCESS:
@@ -518,6 +1140,10 @@ def _init_deep_stream_backend() -> None:
             _deep_model = Qwen3TTSModel.from_pretrained(
                 TTS_DEEP_STREAM_MODEL_DIR, attn_implementation="eager", **model_kwargs
             )
+        try:
+            _deep_model.model.eval()
+        except Exception:
+            pass
     try:
         _deep_tokenizer = Qwen3TTSTokenizer.from_pretrained(
             tokenizer_dir, attn_implementation="flash_attention_2", **tok_kwargs
@@ -526,6 +1152,10 @@ def _init_deep_stream_backend() -> None:
         _deep_tokenizer = Qwen3TTSTokenizer.from_pretrained(
             tokenizer_dir, attn_implementation="eager", **tok_kwargs
         )
+    try:
+        _deep_tokenizer.model.eval()
+    except Exception:
+        pass
     if TTS_DEEP_STREAM_PROCESS:
         _ensure_deep_worker()
 
@@ -551,7 +1181,8 @@ def _generate_audio_np(req: TTSRequest) -> tuple[np.ndarray, int]:
 
 def _generate_audio_np_deep(req: TTSRequest) -> tuple[np.ndarray, int]:
     assert _deep_tokenizer is not None
-    if _deep_model is not None:
+    if _deep_model is not None and not TTS_DEEP_STREAM_OFFLINE_FROM_CODES:
+        gen_kwargs = _deep_gen_kwargs(req)
         wavs, sr = _deep_model.generate_custom_voice(
             text=req.text,
             speaker=req.speaker,
@@ -559,6 +1190,7 @@ def _generate_audio_np_deep(req: TTSRequest) -> tuple[np.ndarray, int]:
             instruct=req.instruct,
             max_new_tokens=req.max_new_tokens,
             non_streaming_mode=req.non_streaming_mode,
+            **gen_kwargs,
         )
         audio_np = wavs[0]
         if isinstance(audio_np, torch.Tensor):
@@ -567,18 +1199,64 @@ def _generate_audio_np_deep(req: TTSRequest) -> tuple[np.ndarray, int]:
             audio_np = audio_np.flatten()
         return audio_np, sr
 
-    codes_list = _generate_codes_blocking(req)
+    max_frames = _estimate_max_frames(req.text)
+    if max_frames > 0:
+        req = req.copy(update={"max_new_tokens": min(req.max_new_tokens, max_frames)})
+    if TTS_DEEP_STREAM_INCREMENTAL:
+        codes_list = _collect_codes_streaming(req, max_frames)
+    else:
+        codes_list = _generate_codes_blocking(req)
     if not codes_list:
         raise RuntimeError("No audio codes produced")
     codes = codes_list[0]
     if isinstance(codes, torch.Tensor):
         codes = codes.to(torch.long)
-    wavs, sr = _deep_tokenizer.decode([{"audio_codes": codes}])
-    audio_np = wavs[0]
+    codes = _sanitize_codes(codes if isinstance(codes, torch.Tensor) else torch.as_tensor(codes))
+    if TTS_CODE_DUMP_ENABLE:
+        req_seed = _get_request_seed(req)
+        request_tag = f"offline_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        meta = {
+            "request_tag": request_tag,
+            "text": req.text,
+            "task_type": req.task_type,
+            "language": req.language,
+            "speaker": req.speaker,
+            "instruct": req.instruct,
+            "max_new_tokens": req.max_new_tokens,
+            "max_new_tokens_gen": req.max_new_tokens,
+            "max_frames_cap": max_frames,
+            "packet_tokens": max(1, TTS_DEEP_STREAM_PACKET_TOKENS),
+            "left_context": TTS_DEEP_STREAM_LEFT_CONTEXT,
+            "sample_rate": _deep_tokenizer.get_output_sample_rate(),
+            "deterministic": TTS_DEEP_STREAM_DETERMINISTIC,
+            "seed": req_seed if req_seed is not None else TTS_DEEP_STREAM_SEED,
+            "seed_mode": TTS_DEEP_STREAM_SEED_MODE,
+            "process": TTS_DEEP_STREAM_PROCESS,
+            "impl": "paper",
+            "mode": "offline",
+        }
+        try:
+            meta["codebook_size"] = int(getattr(_deep_tokenizer.model.decoder.config, "codebook_size", 0) or 0)
+        except Exception:
+            meta["codebook_size"] = 0
+        _dump_codes(request_tag, codes if isinstance(codes, torch.Tensor) else torch.as_tensor(codes), meta)
+    if TTS_DEEP_STREAM_INCREMENTAL:
+        audio_np, sr = _decode_codes_incremental(
+            codes,
+            packet_tokens=max(1, TTS_DEEP_STREAM_PACKET_TOKENS),
+        )
+    else:
+        audio_np, sr = _decode_codes_streaming(
+            codes,
+            packet_tokens=max(1, TTS_DEEP_STREAM_PACKET_TOKENS),
+            left_context_frames=TTS_DEEP_STREAM_LEFT_CONTEXT,
+        )
     if isinstance(audio_np, torch.Tensor):
         audio_np = audio_np.float().detach().cpu().numpy()
     if audio_np.ndim > 1:
         audio_np = audio_np.flatten()
+    if not TTS_DEEP_STREAM_INCREMENTAL or TTS_DEEP_STREAM_INCREMENTAL_TRIM_OFFLINE:
+        audio_np = _trim_trailing_silence(audio_np, sr)
     return audio_np, sr
 
 
@@ -658,7 +1336,10 @@ def synthesize_stream(req: TTSRequest):
     chunk_ms = int(os.environ.get("TTS_STREAM_CHUNK_MS", "30"))
     chunk_ms = max(20, min(40, chunk_ms))
     sent_samples = 0
-    segments = _split_text_stream(req.text)
+    if TTS_DEEP_STREAM_SEGMENT:
+        segments = _split_text_stream(req.text)
+    else:
+        segments = [req.text]
     if not segments:
         segments = [req.text]
     warm_request = _warmup_done and _first_request_done
@@ -686,6 +1367,7 @@ def synthesize_stream(req: TTSRequest):
                 for chunk in _iter_pcm16_chunks(cached_pcm, cached_sr, chunk_ms):
                     if first_out is None:
                         first_out = time.time()
+                        _record_metrics()
                         print(
                             f"[TTS_CACHE] t_req_in={t_req_in:.6f} "
                             f"t_first_audio_out={first_out:.6f} "
@@ -765,6 +1447,13 @@ def synthesize_stream(req: TTSRequest):
         sys.stdout.flush()
         _first_request_done = True
 
+    gen = _gen()
+    first_chunk = b""
+    try:
+        first_chunk = next(gen)
+    except StopIteration:
+        gen = iter(())
+
     headers = {
         "X-Sample-Rate": str(sr),
         "X-PCM-Format": "s16le",
@@ -780,12 +1469,16 @@ def synthesize_stream(req: TTSRequest):
 def _synthesize_stream_deep(req: TTSRequest):
     assert _deep_tokenizer is not None
     global _first_request_done
+    request_tag = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
     t_req_in = time.time()
     first_out: Optional[float] = None
     sr = 24000
     chunk_ms = int(os.environ.get("TTS_STREAM_CHUNK_MS", "30"))
     chunk_ms = max(20, min(40, chunk_ms))
-    segments = _split_text_stream(req.text)
+    if TTS_DEEP_STREAM_SEGMENT:
+        segments = _split_text_stream(req.text)
+    else:
+        segments = [req.text]
     if not segments:
         segments = [req.text]
     warm_request = _warmup_done and _first_request_done
@@ -794,6 +1487,14 @@ def _synthesize_stream_deep(req: TTSRequest):
     cached_pcm = None
     cached_sr = None
     packet_tokens = max(1, TTS_DEEP_STREAM_PACKET_TOKENS)
+    left_context_frames = max(0, TTS_DEEP_STREAM_LEFT_CONTEXT)
+    req_seed = _get_request_seed(req)
+    metrics = {
+        "model_ttfp_ms": -1.0,
+        "model_ttf_ms": -1.0,
+        "server_ttfa_ms": -1.0,
+    }
+    codes_all: list[torch.Tensor] = []
     if _starter_cache_ready and segments:
         key = segments[0].strip()
         cached = _starter_cache.get(key)
@@ -809,8 +1510,49 @@ def _synthesize_stream_deep(req: TTSRequest):
         nonlocal first_out, sr
         t_after_lock = None
         t_before_generate = None
+        t_first_packet_ready: Optional[float] = None
+        t_first_decode_done: Optional[float] = None
+        t_codegen_done: Optional[float] = None
         decode_ms_list: list[float] = []
         deadline = t_req_in + TTS_DEEP_STREAM_REQUEST_TIMEOUT_S
+        use_incremental = TTS_DEEP_STREAM_INCREMENTAL
+        incremental_decoder: Optional[IncrementalDecoder] = None
+        incremental_state = None
+        incremental_tail = np.zeros((0,), dtype=np.float32)
+        incremental_emitted = 0
+        holdback_samples = 0
+        prefill_packets = max(0, TTS_DEEP_STREAM_PREFILL_PACKETS)
+        prefill_buf: list[tuple[torch.Tensor, object]] = []
+        prefill_done = prefill_packets == 0
+        decode_every = max(1, TTS_DEEP_STREAM_DECODE_EVERY)
+        decode_every_buf: list[torch.Tensor] = []
+        decode_every_count = 0
+        decoder_stream = None
+        decoder_event_done = None
+        decode_every_event = None
+        packet_event = None
+        packet_trace = {
+            "queue_wait_ms": 0.0,
+            "decode_calls": 0,
+            "codes_frames_max": 0,
+            "pcm_samples_total": 0,
+            "pcm_samples_max": 0,
+        }
+        if use_incremental:
+            mode = TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER
+            if mode not in ("cache", "window", "full"):
+                mode = "cache"
+            incremental_decoder = IncrementalDecoder(
+                _deep_tokenizer, device=TTS_DEEP_STREAM_DEVICE, transformer_mode=mode
+            )
+            incremental_state = incremental_decoder.reset_state()
+            holdback_samples = TTS_DEEP_STREAM_INCREMENTAL_HOLDBACK
+            if holdback_samples < 0:
+                try:
+                    holdback_samples = int(_deep_tokenizer.get_decode_upsample_rate())
+                except Exception:
+                    holdback_samples = 0
+            holdback_samples = max(0, holdback_samples)
 
         def _check_deadline() -> bool:
             if TTS_DEEP_STREAM_REQUEST_TIMEOUT_S <= 0:
@@ -823,6 +1565,122 @@ def _synthesize_stream_deep(req: TTSRequest):
         def _record_decode(ms: float) -> None:
             if TTS_DEEP_STREAM_METRICS:
                 decode_ms_list.append(ms)
+
+        def _record_metrics() -> None:
+            if metrics["server_ttfa_ms"] < 0 and first_out is not None:
+                metrics["server_ttfa_ms"] = (first_out - t_req_in) * 1000.0
+            if metrics["model_ttfp_ms"] < 0 and t_before_generate and t_first_packet_ready:
+                metrics["model_ttfp_ms"] = (t_first_packet_ready - t_before_generate) * 1000.0
+            if metrics["model_ttf_ms"] < 0 and t_before_generate and t_first_decode_done:
+                metrics["model_ttf_ms"] = (t_first_decode_done - t_before_generate) * 1000.0
+
+        def _decode_with_sync(codes_tensor: torch.Tensor, codes_event=None) -> np.ndarray:
+            nonlocal incremental_state, decoder_stream, decoder_event_done
+            if incremental_decoder is None or incremental_state is None:
+                raise RuntimeError("incremental decoder not initialized")
+            if TTS_DEEP_STREAM_SYNC_MODE == "sync" and TTS_DEEP_STREAM_DEVICE != "cpu":
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+            if (
+                TTS_DEEP_STREAM_SYNC_MODE == "event"
+                and TTS_DEEP_STREAM_DEVICE != "cpu"
+                and torch.cuda.is_available()
+            ):
+                if decoder_stream is None:
+                    decoder_stream = torch.cuda.Stream()
+                if decoder_event_done is None:
+                    decoder_event_done = torch.cuda.Event(enable_timing=False)
+                if codes_event is None:
+                    try:
+                        codes_event = torch.cuda.Event(enable_timing=False)
+                        codes_event.record(torch.cuda.current_stream())
+                    except Exception:
+                        codes_event = None
+                with torch.cuda.stream(decoder_stream):
+                    if codes_event is not None:
+                        try:
+                            decoder_stream.wait_event(codes_event)
+                        except Exception:
+                            pass
+                    audio_np, _state = incremental_decoder.decode_incremental(
+                        codes_tensor, incremental_state
+                    )
+                    decoder_event_done.record(decoder_stream)
+                try:
+                    torch.cuda.current_stream().wait_event(decoder_event_done)
+                except Exception:
+                    pass
+            else:
+                audio_np, _state = incremental_decoder.decode_incremental(
+                    codes_tensor, incremental_state
+                )
+            incremental_state = _state
+            return audio_np
+
+        def _decode_incremental_codes(
+            codes_tensor: torch.Tensor, codes_event=None
+        ) -> Generator[bytes, None, None]:
+            nonlocal t_first_packet_ready, t_first_decode_done, incremental_tail, incremental_emitted, silence_packets
+            nonlocal incremental_state, first_out
+            if t_first_packet_ready is None:
+                t_first_packet_ready = time.time()
+            t_decode = time.time()
+            audio_np = _decode_with_sync(codes_tensor, codes_event=codes_event)
+            t_decode_done = time.time()
+            if t_first_decode_done is None:
+                t_first_decode_done = t_decode_done
+            _record_decode((t_decode_done - t_decode) * 1000.0)
+            if TTS_DEEP_STREAM_PACKET_TRACE:
+                packet_trace["decode_calls"] += 1
+                packet_trace["codes_frames_max"] = max(packet_trace["codes_frames_max"], int(codes_tensor.shape[0]))
+                packet_trace["pcm_samples_total"] += int(audio_np.size)
+                packet_trace["pcm_samples_max"] = max(packet_trace["pcm_samples_max"], int(audio_np.size))
+            if audio_np.size > 0:
+                if incremental_tail.size == 0:
+                    incremental_tail = audio_np
+                else:
+                    incremental_tail = np.concatenate([incremental_tail, audio_np], axis=0)
+                max_emit = max(0, incremental_state.expected_samples - holdback_samples)
+                can_emit = max_emit - incremental_emitted
+                if can_emit > 0:
+                    if len(incremental_tail) > can_emit:
+                        emit_audio = incremental_tail[:can_emit]
+                        incremental_tail = incremental_tail[can_emit:]
+                    else:
+                        emit_audio = incremental_tail
+                        incremental_tail = np.zeros((0,), dtype=np.float32)
+                    incremental_emitted += len(emit_audio)
+                    if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                        rms = float(np.sqrt(np.mean(emit_audio**2))) if emit_audio.size > 0 else 0.0
+                        if rms < TTS_DEEP_STREAM_SILENCE_RMS:
+                            silence_packets += 1
+                        else:
+                            silence_packets = 0
+                    chunk_samples = max(1, int(sr * chunk_ms / 1000))
+                    for chunk in _iter_audio_chunks(emit_audio, chunk_samples):
+                        if _check_deadline():
+                            break
+                        if cancel_event.is_set():
+                            break
+                        if first_out is None:
+                            first_out = time.time()
+                            _record_metrics()
+                            print(
+                                f"[TTS_DEEP] req_tag={request_tag} t_req_in={t_req_in:.6f} "
+                                f"t_after_lock={t_after_lock:.6f} "
+                                f"t_before_generate={t_before_generate:.6f} "
+                                f"t_first_audio_out={first_out:.6f} "
+                                f"lock_wait={(t_after_lock - t_req_in):.3f} "
+                                f"gen_to_first={(first_out - t_before_generate):.3f} "
+                                f"ttfa={first_out - t_req_in:.3f} warm={warm_request} "
+                                f"segments={len(segments)} chunk_ms={chunk_ms} "
+                                f"packet_tokens={packet_tokens} left_ctx={left_context_frames} "
+                                f"impl=paper cache_hit={str(cache_hit).lower()}"
+                            )
+                            sys.stdout.flush()
+                        yield chunk
         try:
             if cache_hit and cached_pcm and cached_sr:
                 for chunk in _iter_pcm16_chunks(cached_pcm, cached_sr, chunk_ms):
@@ -846,128 +1704,159 @@ def _synthesize_stream_deep(req: TTSRequest):
                         break
                     if cache_hit and seg_idx == 0:
                         continue
-                    pending_tail = np.zeros((0,), dtype=np.float32)
-                    overlap_samples = None
-                    window_packets = max(1, TTS_DEEP_STREAM_WINDOW_PACKETS)
-                    window_tokens = max(packet_tokens, window_packets * packet_tokens)
-                    codes_accum: deque[torch.Tensor] = deque(maxlen=window_tokens + packet_tokens)
+                    total_frames = 0
+                    frames_emitted = 0
+                    silence_packets = 0
+                    max_frames = _estimate_max_frames(seg)
+                    req_max_new_tokens = req.max_new_tokens
+                    if max_frames > 0:
+                        req_max_new_tokens = min(req.max_new_tokens, max_frames)
+                    codes_buffer: deque[torch.Tensor] = deque(maxlen=left_context_frames + packet_tokens)
+                    packet_buf: list[torch.Tensor] = []
                     if t_before_generate is None:
                         t_before_generate = time.time()
 
-                    def _emit_with_overlap(new_audio: np.ndarray) -> list[np.ndarray]:
-                        nonlocal pending_tail, overlap_samples
-                        if new_audio.size == 0:
-                            return []
-                        if overlap_samples is None or overlap_samples <= 0:
-                            return [new_audio]
-                        out_chunks: list[np.ndarray] = []
-                        if pending_tail.size == 0:
-                            if len(new_audio) <= overlap_samples:
-                                pending_tail = new_audio
-                                return []
-                            out_chunks.append(new_audio[:-overlap_samples])
-                            pending_tail = new_audio[-overlap_samples:]
-                            return out_chunks
-                        n = min(overlap_samples, len(pending_tail), len(new_audio))
-                        if n > 0:
-                            fade = np.linspace(0.0, 1.0, n, dtype=np.float32)
-                            cross = pending_tail[-n:] * (1.0 - fade) + new_audio[:n] * fade
-                            if len(pending_tail) > n:
-                                out_chunks.append(np.concatenate([pending_tail[:-n], cross], axis=0))
-                            else:
-                                out_chunks.append(cross)
-                            remain = new_audio[n:]
-                        else:
-                            out_chunks.append(pending_tail)
-                            remain = new_audio
-                        if len(remain) <= overlap_samples:
-                            pending_tail = remain
-                        else:
-                            out_chunks.append(remain[:-overlap_samples])
-                            pending_tail = remain[-overlap_samples:]
-                        return out_chunks
-
-                    def _align_window_audio(full_audio: np.ndarray) -> np.ndarray:
-                        nonlocal pending_tail, overlap_samples
-                        if full_audio.size == 0:
-                            return full_audio
-                        if overlap_samples is None or overlap_samples <= 0:
-                            return full_audio
-                        if pending_tail.size == 0:
-                            return full_audio
-                        if len(full_audio) <= overlap_samples:
-                            return full_audio
-                        search_len = min(len(full_audio), max(overlap_samples * 3, overlap_samples + 1))
-                        if search_len <= overlap_samples:
-                            return full_audio
-                        tail = pending_tail
-                        if len(tail) > search_len:
-                            return full_audio
-                        search = full_audio[:search_len]
-                        tail_z = tail - np.mean(tail)
-                        search_z = search - np.mean(search)
-                        corr = np.correlate(search_z, tail_z, mode="valid")
-                        offset = int(np.argmax(corr)) if corr.size > 0 else 0
-                        return full_audio[offset:]
-
-                    for codes in _iter_deep_codes(
-                        TTSRequest(
-                            text=seg,
-                            task_type=req.task_type,
-                            language=req.language,
-                            speaker=req.speaker,
-                            instruct=req.instruct,
-                            max_new_tokens=req.max_new_tokens,
-                            non_streaming_mode=req.non_streaming_mode,
-                        ),
-                        cancel_event,
-                    ):
+                    gen_req = TTSRequest(
+                        text=seg,
+                        task_type=req.task_type,
+                        language=req.language,
+                        speaker=req.speaker,
+                        instruct=req.instruct,
+                        max_new_tokens=req_max_new_tokens,
+                        non_streaming_mode=req.non_streaming_mode,
+                    )
+                    if TTS_DEEP_STREAM_CODEGEN_BLOCKING:
+                        codes_iter = _generate_codes_blocking(gen_req)
+                    else:
+                        codes_iter = _iter_deep_codes(gen_req, cancel_event)
+                    codes_iter = iter(codes_iter)
+                    while True:
+                        t_wait = time.time()
+                        try:
+                            codes = next(codes_iter)
+                        except StopIteration:
+                            break
+                        if TTS_DEEP_STREAM_PACKET_TRACE:
+                            packet_trace["queue_wait_ms"] += (time.time() - t_wait) * 1000.0
                         if _check_deadline():
                             break
                         if cancel_event.is_set():
                             break
-                        if isinstance(codes, torch.Tensor):
-                            if codes.dim() == 2 and codes.shape[0] == 1:
-                                codes = codes.squeeze(0)
-                            codes = codes.to(torch.long)
-                            if TTS_DEEP_STREAM_DEVICE != "cpu":
-                                codes = codes.to(TTS_DEEP_STREAM_DEVICE)
-                            codes_accum.append(codes)
-                        else:
+                        codes_event = None
+                        if isinstance(codes, tuple) and len(codes) == 2:
+                            codes, codes_event = codes
+                        if (
+                            TTS_DEEP_STREAM_SYNC_MODE == "event"
+                            and codes_event is not None
+                            and TTS_DEEP_STREAM_DEVICE != "cpu"
+                            and torch.cuda.is_available()
+                        ):
+                            try:
+                                torch.cuda.current_stream().wait_event(codes_event)
+                            except Exception:
+                                pass
+                            codes_event = None
+                        if not isinstance(codes, torch.Tensor):
                             continue
+                        codes = _normalize_codes_tensor(codes.to(torch.long))
+                        codes = _sanitize_codes(codes)
+                        if TTS_CODE_DUMP_ENABLE:
+                            codes_all.append(codes.detach().cpu())
+                        if TTS_DEEP_STREAM_DEVICE != "cpu":
+                            codes = codes.to(TTS_DEEP_STREAM_DEVICE)
+                        if (
+                            TTS_DEEP_STREAM_SYNC_MODE == "event"
+                            and TTS_DEEP_STREAM_DEVICE != "cpu"
+                            and torch.cuda.is_available()
+                        ):
+                            try:
+                                codes_event = torch.cuda.Event(enable_timing=False)
+                                codes_event.record(torch.cuda.current_stream())
+                            except Exception:
+                                codes_event = None
 
-                        if len(codes_accum) % packet_tokens != 0:
-                            continue
+                        packet_event = codes_event
+                        for frame in codes:
+                            total_frames += 1
+                            if max_frames > 0 and total_frames > max_frames:
+                                cancel_event.set()
+                                break
+                            if use_incremental:
+                                packet_buf.append(frame)
+                                if len(packet_buf) < packet_tokens:
+                                    continue
+                                codes_tensor = torch.stack(packet_buf, dim=0)
+                                packet_buf.clear()
+                                packet_event_local = packet_event
+                                if decode_every > 1:
+                                    decode_every_buf.append(codes_tensor)
+                                    decode_every_count += 1
+                                    decode_every_event = packet_event_local
+                                    if decode_every_count < decode_every:
+                                        continue
+                                    codes_tensor = torch.cat(decode_every_buf, dim=0)
+                                    decode_every_buf.clear()
+                                    decode_every_count = 0
+                                    packet_event_local = decode_every_event
+                                    decode_every_event = None
+                                if not prefill_done:
+                                    prefill_buf.append((codes_tensor, packet_event_local))
+                                    if len(prefill_buf) < prefill_packets:
+                                        continue
+                                    prefill_done = True
+                                    for pre_codes, pre_event in prefill_buf:
+                                        yield from _decode_incremental_codes(
+                                            pre_codes, codes_event=pre_event
+                                        )
+                                    prefill_buf.clear()
+                                    continue
+                                yield from _decode_incremental_codes(
+                                    codes_tensor, codes_event=packet_event_local
+                                )
+                                if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                                    cancel_event.set()
+                                    break
+                                continue
 
-                        window_list = list(codes_accum)[-window_tokens:]
-                        codes_tensor = torch.stack(window_list, dim=0)
-                        t_decode = time.time()
-                        wavs, sr = _deep_tokenizer.decode([{"audio_codes": codes_tensor}])
-                        _record_decode((time.time() - t_decode) * 1000.0)
-                        audio_np = wavs[0]
-                        if isinstance(audio_np, torch.Tensor):
-                            audio_np = audio_np.float().detach().cpu().numpy()
-                        if audio_np.ndim > 1:
-                            audio_np = audio_np.flatten()
-
-                        if overlap_samples is None:
-                            overlap_samples = int(sr * TTS_DEEP_STREAM_OVERLAP_MS / 1000)
-                        aligned_audio = _align_window_audio(audio_np)
-                        window_token_count = max(1, codes_tensor.shape[0])
-                        new_samples = int(round(len(aligned_audio) * packet_tokens / window_token_count))
-                        new_samples = max(1, min(len(aligned_audio), new_samples))
-                        new_audio = aligned_audio[-new_samples:]
-                        chunk_samples = max(1, int(sr * chunk_ms / 1000))
-                        for emit_audio in _emit_with_overlap(new_audio):
-                            for chunk in _iter_audio_chunks(emit_audio, chunk_samples):
+                            codes_buffer.append(frame)
+                            if (total_frames - frames_emitted) < packet_tokens:
+                                continue
+                            new_frames = packet_tokens
+                            ctx = min(left_context_frames, max(0, len(codes_buffer) - new_frames))
+                            needed = ctx + new_frames
+                            if needed <= 0:
+                                continue
+                            codes_list = list(codes_buffer)[-needed:]
+                            codes_tensor = torch.stack(codes_list, dim=0)
+                            if t_first_packet_ready is None:
+                                t_first_packet_ready = time.time()
+                            t_decode = time.time()
+                            start_position = max(0, frames_emitted - ctx)
+                            wavs, sr = _deep_tokenizer.decode_streaming(
+                                codes_tensor, left_context_size=ctx, start_position=start_position
+                            )
+                            t_decode_done = time.time()
+                            if t_first_decode_done is None:
+                                t_first_decode_done = t_decode_done
+                            _record_decode((t_decode_done - t_decode) * 1000.0)
+                            audio_np = wavs[0]
+                            if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                                rms = float(np.sqrt(np.mean(audio_np**2))) if audio_np.size > 0 else 0.0
+                                if rms < TTS_DEEP_STREAM_SILENCE_RMS:
+                                    silence_packets += 1
+                                else:
+                                    silence_packets = 0
+                            chunk_samples = max(1, int(sr * chunk_ms / 1000))
+                            for chunk in _iter_audio_chunks(audio_np, chunk_samples):
                                 if _check_deadline():
                                     break
                                 if cancel_event.is_set():
                                     break
                                 if first_out is None:
                                     first_out = time.time()
+                                    _record_metrics()
                                     print(
-                                        f"[TTS_DEEP] t_req_in={t_req_in:.6f} "
+                                        f"[TTS_DEEP] req_tag={request_tag} t_req_in={t_req_in:.6f} "
                                         f"t_after_lock={t_after_lock:.6f} "
                                         f"t_before_generate={t_before_generate:.6f} "
                                         f"t_first_audio_out={first_out:.6f} "
@@ -975,33 +1864,98 @@ def _synthesize_stream_deep(req: TTSRequest):
                                         f"gen_to_first={(first_out - t_before_generate):.3f} "
                                         f"ttfa={first_out - t_req_in:.3f} warm={warm_request} "
                                         f"segments={len(segments)} chunk_ms={chunk_ms} "
-                                        f"packet_tokens={packet_tokens} window_packets={window_packets} "
-                                        f"overlap_ms={TTS_DEEP_STREAM_OVERLAP_MS} cache_hit={str(cache_hit).lower()}"
+                                        f"packet_tokens={packet_tokens} left_ctx={left_context_frames} "
+                                        f"impl=paper cache_hit={str(cache_hit).lower()}"
                                     )
                                     sys.stdout.flush()
                                 yield chunk
+                            frames_emitted += new_frames
+                            if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                                cancel_event.set()
+                                break
+                            continue
 
-                    remaining_tokens = len(codes_accum) % packet_tokens
-                    if codes_accum and remaining_tokens:
-                        window_list = list(codes_accum)[-window_tokens:]
-                        codes_tensor = torch.stack(window_list, dim=0)
-                        t_decode = time.time()
-                        wavs, sr = _deep_tokenizer.decode([{"audio_codes": codes_tensor}])
-                        _record_decode((time.time() - t_decode) * 1000.0)
-                        audio_np = wavs[0]
-                        if isinstance(audio_np, torch.Tensor):
-                            audio_np = audio_np.float().detach().cpu().numpy()
-                        if audio_np.ndim > 1:
-                            audio_np = audio_np.flatten()
-                        if overlap_samples is None:
-                            overlap_samples = int(sr * TTS_DEEP_STREAM_OVERLAP_MS / 1000)
-                        aligned_audio = _align_window_audio(audio_np)
-                        window_token_count = max(1, codes_tensor.shape[0])
-                        new_samples = int(round(len(aligned_audio) * remaining_tokens / window_token_count))
-                        new_samples = max(1, min(len(aligned_audio), new_samples))
-                        new_audio = aligned_audio[-new_samples:]
-                        chunk_samples = max(1, int(sr * chunk_ms / 1000))
-                        for emit_audio in _emit_with_overlap(new_audio):
+                    if not cancel_event.is_set():
+                        t_codegen_done = time.time()
+
+                    if use_incremental and not cancel_event.is_set() and not _check_deadline():
+                        if packet_buf:
+                            codes_tensor = torch.stack(packet_buf, dim=0)
+                            packet_buf.clear()
+                            if decode_every > 1:
+                                decode_every_buf.append(codes_tensor)
+                                decode_every_count += 1
+                                decode_every_event = packet_event
+                            else:
+                                decode_every_buf.append(codes_tensor)
+                                decode_every_count += 1
+                            if decode_every > 1 and decode_every_count < decode_every:
+                                codes_tensor = None
+                            else:
+                                codes_tensor = torch.cat(decode_every_buf, dim=0)
+                                decode_every_buf.clear()
+                                decode_every_count = 0
+                                packet_event = decode_every_event
+                                decode_every_event = None
+                            if t_first_packet_ready is None:
+                                t_first_packet_ready = time.time()
+                            t_decode = time.time()
+                            audio_np = np.zeros((0,), dtype=np.float32)
+                            if codes_tensor is not None:
+                                audio_np = _decode_with_sync(
+                                    codes_tensor, codes_event=packet_event
+                                )
+                            t_decode_done = time.time()
+                            if t_first_decode_done is None:
+                                t_first_decode_done = t_decode_done
+                            _record_decode((t_decode_done - t_decode) * 1000.0)
+                            if TTS_DEEP_STREAM_PACKET_TRACE and codes_tensor is not None:
+                                packet_trace["decode_calls"] += 1
+                                packet_trace["codes_frames_max"] = max(
+                                    packet_trace["codes_frames_max"], int(codes_tensor.shape[0])
+                                )
+                                packet_trace["pcm_samples_total"] += int(audio_np.size)
+                                packet_trace["pcm_samples_max"] = max(packet_trace["pcm_samples_max"], int(audio_np.size))
+                            if codes_tensor is not None and audio_np.size > 0:
+                                if incremental_tail.size == 0:
+                                    incremental_tail = audio_np
+                                else:
+                                    incremental_tail = np.concatenate([incremental_tail, audio_np], axis=0)
+                        if decode_every_buf:
+                            codes_tensor = torch.cat(decode_every_buf, dim=0)
+                            decode_every_buf.clear()
+                            decode_every_count = 0
+                            if t_first_packet_ready is None:
+                                t_first_packet_ready = time.time()
+                            t_decode = time.time()
+                            audio_np = _decode_with_sync(
+                                codes_tensor, codes_event=decode_every_event
+                            )
+                            decode_every_event = None
+                            t_decode_done = time.time()
+                            if t_first_decode_done is None:
+                                t_first_decode_done = t_decode_done
+                            _record_decode((t_decode_done - t_decode) * 1000.0)
+                            if TTS_DEEP_STREAM_PACKET_TRACE:
+                                packet_trace["decode_calls"] += 1
+                                packet_trace["codes_frames_max"] = max(
+                                    packet_trace["codes_frames_max"], int(codes_tensor.shape[0])
+                                )
+                                packet_trace["pcm_samples_total"] += int(audio_np.size)
+                                packet_trace["pcm_samples_max"] = max(packet_trace["pcm_samples_max"], int(audio_np.size))
+                            if audio_np.size > 0:
+                                if incremental_tail.size == 0:
+                                    incremental_tail = audio_np
+                                else:
+                                    incremental_tail = np.concatenate([incremental_tail, audio_np], axis=0)
+                        remaining = (
+                            incremental_state.expected_samples - incremental_emitted
+                            if incremental_state is not None
+                            else 0
+                        )
+                        if remaining > 0 and incremental_tail.size > 0:
+                            emit_audio = incremental_tail[:remaining]
+                            chunk_samples = max(1, int(sr * chunk_ms / 1000))
                             for chunk in _iter_audio_chunks(emit_audio, chunk_samples):
                                 if _check_deadline():
                                     break
@@ -1009,18 +1963,49 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     break
                                 if first_out is None:
                                     first_out = time.time()
+                                    _record_metrics()
                                 yield chunk
+                            incremental_tail = np.zeros((0,), dtype=np.float32)
 
-                    if pending_tail.size > 0:
-                        chunk_samples = max(1, int(sr * chunk_ms / 1000))
-                        for chunk in _iter_audio_chunks(pending_tail, chunk_samples):
-                            if _check_deadline():
-                                break
-                            if cancel_event.is_set():
-                                break
-                            if first_out is None:
-                                first_out = time.time()
-                            yield chunk
+                    if not use_incremental:
+                        remaining = total_frames - frames_emitted
+                        if remaining > 0 and not cancel_event.is_set() and not _check_deadline():
+                            ctx = min(left_context_frames, max(0, len(codes_buffer) - remaining))
+                            needed = ctx + remaining
+                            codes_list = list(codes_buffer)[-needed:] if needed > 0 else []
+                            if codes_list:
+                                codes_tensor = torch.stack(codes_list, dim=0)
+                                if t_first_packet_ready is None:
+                                    t_first_packet_ready = time.time()
+                                t_decode = time.time()
+                                start_position = max(0, frames_emitted - ctx)
+                                wavs, sr = _deep_tokenizer.decode_streaming(
+                                    codes_tensor, left_context_size=ctx, start_position=start_position
+                                )
+                                t_decode_done = time.time()
+                                if t_first_decode_done is None:
+                                    t_first_decode_done = t_decode_done
+                                _record_decode((t_decode_done - t_decode) * 1000.0)
+                                audio_np = wavs[0]
+                                if TTS_DEEP_STREAM_SILENCE_PACKETS > 0:
+                                    rms = float(np.sqrt(np.mean(audio_np**2))) if audio_np.size > 0 else 0.0
+                                    if rms < TTS_DEEP_STREAM_SILENCE_RMS:
+                                        silence_packets += 1
+                                    else:
+                                        silence_packets = 0
+                                chunk_samples = max(1, int(sr * chunk_ms / 1000))
+                                for chunk in _iter_audio_chunks(audio_np, chunk_samples):
+                                    if _check_deadline():
+                                        break
+                                    if cancel_event.is_set():
+                                        break
+                                    if first_out is None:
+                                        first_out = time.time()
+                                        _record_metrics()
+                                    yield chunk
+                                if silence_packets >= TTS_DEEP_STREAM_SILENCE_PACKETS:
+                                    cancel_event.set()
+                            frames_emitted = total_frames
 
                     if cancel_event.is_set():
                         break
@@ -1033,6 +2018,27 @@ def _synthesize_stream_deep(req: TTSRequest):
                 sys.stdout.flush()
 
         t_done = time.time()
+        _record_metrics()
+        if (
+            TTS_DEEP_STREAM_TRACE_TIMING
+            and t_first_packet_ready
+            and t_first_decode_done
+            and t_codegen_done
+            and first_out is not None
+        ):
+            overlap = t_first_decode_done < t_codegen_done
+            print(
+                f"[TTS_TIMING] req_tag={request_tag} "
+                f"t_req_in={t_req_in:.6f} "
+                f"t_code_first={t_first_packet_ready:.6f} "
+                f"t_decode_first={t_first_decode_done:.6f} "
+                f"t_first_audio={first_out:.6f} "
+                f"t_codegen_done={t_codegen_done:.6f} "
+                f"overlap={str(overlap).lower()} "
+                f"code_to_decode={(t_first_decode_done - t_first_packet_ready):.3f} "
+                f"code_to_done={(t_codegen_done - t_first_packet_ready):.3f}"
+            )
+            sys.stdout.flush()
         if TTS_DEEP_STREAM_METRICS and decode_ms_list:
             if len(decode_ms_list) >= 2:
                 x = np.arange(1, len(decode_ms_list) + 1, dtype=np.float32)
@@ -1047,12 +2053,69 @@ def _synthesize_stream_deep(req: TTSRequest):
             )
             sys.stdout.flush()
         print(
-            f"[TTS_DEEP] t_req_in={t_req_in:.6f} t_done={t_done:.6f} "
+            f"[TTS_DEEP] req_tag={request_tag} t_req_in={t_req_in:.6f} t_done={t_done:.6f} "
             f"total={(t_done - t_req_in):.3f} warm={warm_request} "
             f"segments={len(segments)} chunk_ms={chunk_ms} packet_tokens={packet_tokens}"
         )
         sys.stdout.flush()
         _first_request_done = True
+        if TTS_CODE_DUMP_ENABLE and codes_all:
+            codes_tensor = torch.cat(codes_all, dim=0)
+            meta = {
+                "request_tag": request_tag,
+                "text": req.text,
+                "task_type": req.task_type,
+                "language": req.language,
+                "speaker": req.speaker,
+                "instruct": req.instruct,
+                "max_new_tokens": req.max_new_tokens,
+                "packet_tokens": packet_tokens,
+                "left_context": left_context_frames,
+                "sample_rate": _deep_tokenizer.get_output_sample_rate(),
+                "deterministic": TTS_DEEP_STREAM_DETERMINISTIC,
+                "seed": req_seed if req_seed is not None else TTS_DEEP_STREAM_SEED,
+                "seed_mode": TTS_DEEP_STREAM_SEED_MODE,
+                "process": TTS_DEEP_STREAM_PROCESS,
+                "impl": "paper",
+            }
+            if TTS_DEEP_STREAM_PACKET_TRACE:
+                meta["queue_wait_ms"] = float(packet_trace["queue_wait_ms"])
+                meta["decode_calls"] = int(packet_trace["decode_calls"])
+                meta["codes_frames_max"] = int(packet_trace["codes_frames_max"])
+                meta["pcm_samples_total"] = int(packet_trace["pcm_samples_total"])
+                meta["pcm_samples_max"] = int(packet_trace["pcm_samples_max"])
+            if t_first_packet_ready is not None:
+                meta["t_code_first"] = t_first_packet_ready
+                meta["code_ms"] = (t_first_packet_ready - t_req_in) * 1000.0
+            if t_first_decode_done is not None:
+                meta["t_decode_first"] = t_first_decode_done
+                if t_first_packet_ready is not None:
+                    meta["decode_first_ms"] = (t_first_decode_done - t_first_packet_ready) * 1000.0
+            if first_out is not None:
+                meta["t_first_audio"] = first_out
+                meta["ttfa_ms"] = (first_out - t_req_in) * 1000.0
+            if t_codegen_done is not None and t_first_packet_ready is not None:
+                meta["t_codegen_done"] = t_codegen_done
+                meta["code_total_ms"] = (t_codegen_done - t_first_packet_ready) * 1000.0
+            try:
+                meta["codebook_size"] = int(getattr(_deep_tokenizer.model.decoder.config, "codebook_size", 0) or 0)
+            except Exception:
+                meta["codebook_size"] = 0
+            _dump_codes(request_tag, codes_tensor, meta)
+
+    left_ctx_header = TTS_DEEP_STREAM_LEFT_CONTEXT
+    if left_ctx_header < 0 and _deep_tokenizer is not None:
+        try:
+            left_ctx_header = int(getattr(_deep_tokenizer.model.config.decoder_config, "sliding_window", 72))
+        except Exception:
+            left_ctx_header = 25
+
+    gen = _gen()
+    first_chunk = b""
+    try:
+        first_chunk = next(gen)
+    except StopIteration:
+        gen = iter(())
 
     headers = {
         "X-Sample-Rate": str(sr),
@@ -1064,11 +2127,27 @@ def _synthesize_stream_deep(req: TTSRequest):
         "X-Cache-Starter": str(cache_hit).lower(),
         "X-Deep-Stream": "true",
         "X-Packet-Tokens": str(packet_tokens),
-        "X-Window-Packets": str(TTS_DEEP_STREAM_WINDOW_PACKETS),
-        "X-Overlap-Ms": str(TTS_DEEP_STREAM_OVERLAP_MS),
         "X-Deep-Process": str(TTS_DEEP_STREAM_PROCESS).lower(),
+        "X-Deep-Stream-Impl": "paper",
+        "X-Deep-Decode-Mode": (
+            f"incremental:{TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER}"
+            if TTS_DEEP_STREAM_INCREMENTAL
+            else "windowed"
+        ),
+        "X-Left-Context": str(left_ctx_header),
+        "X-Silence-Rms": str(TTS_DEEP_STREAM_SILENCE_RMS),
+        "X-Silence-Packets": str(TTS_DEEP_STREAM_SILENCE_PACKETS),
+        "X-Model-TTFP-MS": f"{metrics['model_ttfp_ms']:.3f}",
+        "X-Model-TTF-MS": f"{metrics['model_ttf_ms']:.3f}",
+        "X-Server-TTFA-MS": f"{metrics['server_ttfa_ms']:.3f}",
+        "X-Code-Dump-Tag": request_tag,
     }
-    return StreamingResponse(_gen(), media_type="audio/pcm", headers=headers)
+    def _gen_with_first() -> Generator[bytes, None, None]:
+        if first_chunk:
+            yield first_chunk
+        yield from gen
+
+    return StreamingResponse(_gen_with_first(), media_type="audio/pcm", headers=headers)
 
 
 if __name__ == "__main__":
