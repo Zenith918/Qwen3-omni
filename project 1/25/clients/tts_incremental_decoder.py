@@ -14,6 +14,21 @@ from transformers.cache_utils import Cache
 TTS_DEEP_STREAM_TRACE_POS = os.environ.get("TTS_DEEP_STREAM_TRACE_POS", "0").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_TRACE_POS_LIMIT = int(os.environ.get("TTS_DEEP_STREAM_TRACE_POS_LIMIT", "8"))
 TTS_DEEP_STREAM_DUMMY_DECODER = os.environ.get("TTS_DEEP_STREAM_DUMMY_DECODER", "full").strip().lower()
+TTS_DEEP_STREAM_USE_CUDAGRAPH = os.environ.get("TTS_DEEP_STREAM_USE_CUDAGRAPH", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+@dataclass
+class _CUDAGraphCache:
+    graph: torch.cuda.CUDAGraph
+    static_hidden: torch.Tensor
+    static_out: torch.Tensor
+    t_new: int
+    state_id: int
+    dtype: torch.dtype
 
 
 @dataclass
@@ -139,6 +154,10 @@ class IncrementalDecoder:
         self.decode_upsample_rate = int(self.model.get_decode_upsample_rate())
         self.transformer_mode = transformer_mode
         self.window_size = int(getattr(self.decoder.pre_transformer, "window_size", 72))
+        self.use_cudagraph = (
+            TTS_DEEP_STREAM_USE_CUDAGRAPH and torch.cuda.is_available() and self.device.type == "cuda"
+        )
+        self._cg_cache: dict[int, _CUDAGraphCache] = {}
 
     def reset_state(self) -> DecoderState:
         state = DecoderState()
@@ -150,7 +169,73 @@ class IncrementalDecoder:
                 continue
             unit_states = [ResidualUnitState() for _ in block.block[2:]]
             state.decoder_blocks.append(DecoderBlockState(trans_prev=None, residuals=unit_states))
+        if self.use_cudagraph:
+            self._cg_cache.clear()
         return state
+
+    def _decode_conv_path(self, hidden: torch.Tensor, state: DecoderState) -> torch.Tensor:
+        for idx, blocks in enumerate(self.decoder.upsample):
+            trans = blocks[0]
+            hidden, state.upsample_trans_prev[idx] = _stream_transpose_conv(
+                trans, hidden, state.upsample_trans_prev[idx]
+            )
+            convnext = blocks[1]
+            hidden, state.upsample_dwconv[idx] = _stream_convnext(convnext, hidden, state.upsample_dwconv[idx])
+
+        decoder = self.decoder.decoder
+        hidden, state.decoder_pre = _stream_causal_conv(decoder[0], hidden, state.decoder_pre)
+
+        block_states = state.decoder_blocks
+        block_idx = 0
+        for block in decoder[1:-2]:
+            if not hasattr(block, "block"):
+                continue
+            blk_state = block_states[block_idx]
+            block_idx += 1
+            # SnakeBeta then transposed conv
+            hidden = block.block[0](hidden)
+            hidden, blk_state.trans_prev = _stream_transpose_conv(block.block[1], hidden, blk_state.trans_prev)
+            for unit_idx, unit in enumerate(block.block[2:]):
+                hidden, blk_state.residuals[unit_idx] = _stream_residual_unit(
+                    unit, hidden, blk_state.residuals[unit_idx]
+                )
+
+        hidden = decoder[-2](hidden)
+        hidden, state.decoder_post = _stream_causal_conv(decoder[-1], hidden, state.decoder_post)
+        hidden = hidden.clamp(min=-1, max=1).to(torch.float32)
+        return hidden
+
+    def _decode_conv_graph(self, hidden: torch.Tensor, state: DecoderState) -> torch.Tensor:
+        t_new = int(hidden.shape[-1])
+        cache = self._cg_cache.get(t_new)
+        if (
+            cache is None
+            or cache.state_id != id(state)
+            or cache.dtype != hidden.dtype
+            or cache.static_hidden.shape != hidden.shape
+        ):
+            static_hidden = torch.empty_like(hidden)
+            static_hidden.copy_(hidden)
+            graph = torch.cuda.CUDAGraph()
+            try:
+                with torch.cuda.graph(graph):
+                    static_out = self._decode_conv_path(static_hidden, state)
+            except Exception:
+                # Fallback to eager if graph capture fails.
+                return self._decode_conv_path(hidden, state)
+            cache = _CUDAGraphCache(
+                graph=graph,
+                static_hidden=static_hidden,
+                static_out=static_out,
+                t_new=t_new,
+                state_id=id(state),
+                dtype=hidden.dtype,
+            )
+            self._cg_cache[t_new] = cache
+            return cache.static_out
+        cache.static_hidden.copy_(hidden)
+        cache.graph.replay()
+        return cache.static_out
 
     def decode_incremental(
         self,
@@ -253,41 +338,11 @@ class IncrementalDecoder:
                 pre_conv_hook()
 
             try:
-                hidden = hidden.permute(0, 2, 1)
-
-                for idx, blocks in enumerate(self.decoder.upsample):
-                    trans = blocks[0]
-                    hidden, state.upsample_trans_prev[idx] = _stream_transpose_conv(
-                        trans, hidden, state.upsample_trans_prev[idx]
-                    )
-                    convnext = blocks[1]
-                    hidden, state.upsample_dwconv[idx] = _stream_convnext(
-                        convnext, hidden, state.upsample_dwconv[idx]
-                    )
-
-                decoder = self.decoder.decoder
-                hidden, state.decoder_pre = _stream_causal_conv(decoder[0], hidden, state.decoder_pre)
-
-                block_states = state.decoder_blocks
-                block_idx = 0
-                for block in decoder[1:-2]:
-                    if not hasattr(block, "block"):
-                        continue
-                    blk_state = block_states[block_idx]
-                    block_idx += 1
-                    # SnakeBeta then transposed conv
-                    hidden = block.block[0](hidden)
-                    hidden, blk_state.trans_prev = _stream_transpose_conv(
-                        block.block[1], hidden, blk_state.trans_prev
-                    )
-                    for unit_idx, unit in enumerate(block.block[2:]):
-                        hidden, blk_state.residuals[unit_idx] = _stream_residual_unit(
-                            unit, hidden, blk_state.residuals[unit_idx]
-                        )
-
-                hidden = decoder[-2](hidden)
-                hidden, state.decoder_post = _stream_causal_conv(decoder[-1], hidden, state.decoder_post)
-                hidden = hidden.clamp(min=-1, max=1).to(torch.float32)
+                hidden = hidden.permute(0, 2, 1).contiguous()
+                if self.use_cudagraph and hidden.is_cuda and hidden.shape[-1] > 0:
+                    hidden = self._decode_conv_graph(hidden, state)
+                else:
+                    hidden = self._decode_conv_path(hidden, state)
             finally:
                 if post_conv_hook is not None:
                     post_conv_hook()
@@ -307,4 +362,7 @@ class IncrementalDecoder:
             return np.zeros((0,), dtype=np.float32), state
         # Push a zero frame to flush transpose-conv overlap at stream end.
         dummy_codes = torch.zeros((1, codebook_dim), dtype=torch.long)
-        return self.decode_incremental(dummy_codes, state)
+        expected_before = state.expected_samples
+        audio, state = self.decode_incremental(dummy_codes, state)
+        state.expected_samples = expected_before
+        return audio, state

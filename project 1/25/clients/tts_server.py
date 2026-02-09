@@ -49,6 +49,7 @@ TTS_DEEP_STREAM_MODEL_DIR = os.environ.get("TTS_DEEP_STREAM_MODEL_DIR", TTS_MODE
 TTS_DEEP_STREAM_TOKENIZER_DIR = os.environ.get("TTS_DEEP_STREAM_TOKENIZER_DIR", "")
 TTS_DEEP_STREAM_PROCESS = os.environ.get("TTS_DEEP_STREAM_PROCESS", "1").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_METRICS = os.environ.get("TTS_DEEP_STREAM_METRICS", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_GLUE_ONLY_SEC = float(os.environ.get("TTS_DEEP_STREAM_GLUE_ONLY_SEC", "1.0"))
 TTS_DEEP_STREAM_REQUEST_TIMEOUT_S = float(os.environ.get("TTS_DEEP_STREAM_REQUEST_TIMEOUT_S", "120"))
 TTS_DEEP_STREAM_CODE_TIMEOUT_S = float(os.environ.get("TTS_DEEP_STREAM_CODE_TIMEOUT_S", "120"))
 TTS_DEEP_STREAM_IDLE_TIMEOUT_S = float(
@@ -128,7 +129,16 @@ TTS_DEEP_STREAM_CODEGEN_GENERATOR = os.environ.get("TTS_DEEP_STREAM_CODEGEN_GENE
     "true",
     "yes",
 )
-TTS_DEEP_STREAM_INCREMENTAL = os.environ.get("TTS_DEEP_STREAM_INCREMENTAL", "0").lower() in ("1", "true", "yes")
+TTS_DEEP_STREAM_DECODE_MODE = os.environ.get("TTS_DEEP_STREAM_DECODE_MODE", "").strip().lower()
+if TTS_DEEP_STREAM_DECODE_MODE in ("incremental", "windowed"):
+    TTS_DEEP_STREAM_INCREMENTAL = TTS_DEEP_STREAM_DECODE_MODE == "incremental"
+else:
+    TTS_DEEP_STREAM_INCREMENTAL = os.environ.get("TTS_DEEP_STREAM_INCREMENTAL", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    TTS_DEEP_STREAM_DECODE_MODE = "incremental" if TTS_DEEP_STREAM_INCREMENTAL else "windowed"
 TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER = os.environ.get(
     "TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER", "cache"
 ).strip().lower()
@@ -148,6 +158,7 @@ TTS_DEEP_STREAM_PACKET1_TRACE = os.environ.get("TTS_DEEP_STREAM_PACKET1_TRACE", 
     "true",
     "yes",
 )
+TTS_DEEP_STREAM_PACKET_SCHEDULE = os.environ.get("TTS_DEEP_STREAM_PACKET_SCHEDULE", "fixed2").strip().lower()
 TTS_DEEP_STREAM_DECODE_EVERY_N = int(os.environ.get("TTS_DEEP_STREAM_DECODE_EVERY_N", "1"))
 TTS_DEEP_STREAM_DECODER_SYNC = os.environ.get("TTS_DEEP_STREAM_DECODER_SYNC", "0").lower() in (
     "1",
@@ -162,6 +173,9 @@ TTS_DEEP_STREAM_DECODER_SYNC = os.environ.get("TTS_DEEP_STREAM_DECODER_SYNC", "0
     "yes",
 )
 TTS_PACKET_DEBUG = os.environ.get("TTS_PACKET_DEBUG", "0").lower() in ("1", "true", "yes")
+TTS_CODEGEN_CUDAGRAPH_TALKER = os.environ.get("TTS_CODEGEN_CUDAGRAPH_TALKER", "0").lower() in ("1", "true", "yes")
+TTS_CODEGEN_CUDAGRAPH_CP = os.environ.get("TTS_CODEGEN_CUDAGRAPH_CP", "0").lower() in ("1", "true", "yes")
+TTS_DECODER_CUDAGRAPH = os.environ.get("TTS_DECODER_CUDAGRAPH", "0").lower() in ("1", "true", "yes")
 TTS_DEEP_STREAM_CODEGEN_BLOCKING = os.environ.get("TTS_DEEP_STREAM_CODEGEN_BLOCKING", "0").lower() in (
     "1",
     "true",
@@ -1363,6 +1377,19 @@ def _init_deep_stream_backend() -> None:
     if TTS_DEEP_STREAM_PROCESS:
         _ensure_deep_worker()
 
+    # ── CUDA Graph acceleration (flag-controlled, default off) ──
+    if (TTS_CODEGEN_CUDAGRAPH_TALKER or TTS_CODEGEN_CUDAGRAPH_CP) and _deep_model is not None:
+        try:
+            from codegen_cudagraph import install_cudagraph_accelerator
+            install_cudagraph_accelerator(
+                _deep_model,
+                talker_flag=TTS_CODEGEN_CUDAGRAPH_TALKER,
+                cp_flag=TTS_CODEGEN_CUDAGRAPH_CP,
+            )
+        except Exception as _e:
+            print(f"[WARNING] CUDA Graph install failed: {_e}")
+            import traceback; traceback.print_exc()
+
 
 def _generate_audio_np(req: TTSRequest) -> tuple[np.ndarray, int]:
     if TTS_DEEP_STREAM_ENABLE:
@@ -1669,6 +1696,116 @@ def synthesize_stream(req: TTSRequest):
     return StreamingResponse(_gen(), media_type="audio/pcm", headers=headers)
 
 
+@app.post("/tts/stream_glue")
+def synthesize_stream_glue(req: TTSRequest):
+    return _synthesize_stream_glue(req)
+
+
+def _synthesize_stream_glue(req: TTSRequest):
+    request_tag = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    t_req_in = time.time()
+    first_out: Optional[float] = None
+    sr = 24000
+    chunk_ms = int(os.environ.get("TTS_STREAM_CHUNK_MS", "30"))
+    chunk_ms = max(20, min(40, chunk_ms))
+    duration_s = max(0.0, TTS_DEEP_STREAM_GLUE_ONLY_SEC)
+    total_samples = int(duration_s * sr)
+    chunk_samples = max(1, int(sr * chunk_ms / 1000))
+    q: Queue = Queue(maxsize=8)
+    cancel_event = Event()
+    queue_wait_ms_list: list[float] = []
+    emitted_samples = 0
+
+    def _producer():
+        produced = 0
+        while produced < total_samples and not cancel_event.is_set():
+            n = min(chunk_samples, total_samples - produced)
+            audio_np = np.zeros((n,), dtype=np.float32)
+            q.put(audio_np)
+            produced += n
+        q.put(None)
+
+    producer = Thread(target=_producer, daemon=True)
+    producer.start()
+
+    def _gen() -> Generator[bytes, None, None]:
+        nonlocal first_out, emitted_samples
+        try:
+            while True:
+                t_wait = time.time()
+                try:
+                    item = q.get(timeout=0.1)
+                except Empty:
+                    if cancel_event.is_set():
+                        break
+                    continue
+                wait_ms = (time.time() - t_wait) * 1000.0
+                queue_wait_ms_list.append(wait_ms)
+                if item is None:
+                    break
+                for chunk in _iter_audio_chunks(item, chunk_samples):
+                    if first_out is None:
+                        first_out = time.time()
+                    emitted_samples += len(chunk) // 2
+                    yield chunk
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+            cancel_event.set()
+            raise
+        finally:
+            cancel_event.set()
+            try:
+                producer.join(timeout=1.0)
+            except Exception:
+                pass
+            t_done = time.time()
+            queue_wait_p95_ms = _percentile(queue_wait_ms_list, 0.95) if queue_wait_ms_list else -1.0
+            pcm_seconds_emitted = float(emitted_samples) / float(sr) if sr > 0 else -1.0
+            meta = {
+                "request_tag": request_tag,
+                "glue_only": True,
+                "text": req.text,
+                "task_type": req.task_type,
+                "language": req.language,
+                "speaker": req.speaker,
+                "instruct": req.instruct,
+                "max_new_tokens": req.max_new_tokens,
+                "packet_tokens": TTS_DEEP_STREAM_PACKET_TOKENS,
+                "sample_rate": sr,
+                "process": TTS_DEEP_STREAM_PROCESS,
+                "impl": "glue_only",
+                "codegen_wall_ms": 0.0,
+                "decode_wall_ms": 0.0,
+                "glue_wall_ms": (t_done - t_req_in) * 1000.0,
+                "queue_wait_p95_ms": queue_wait_p95_ms,
+                "pcm_seconds_emitted": pcm_seconds_emitted,
+            }
+            if first_out is not None:
+                meta["t_first_audio"] = first_out
+                meta["ttfa_ms"] = (first_out - t_req_in) * 1000.0
+            _dump_codes(request_tag, torch.zeros((0, 1), dtype=torch.long), meta)
+
+    gen = _gen()
+    first_chunk = b""
+    try:
+        first_chunk = next(gen)
+    except StopIteration:
+        gen = iter(())
+
+    def _iter_full():
+        if first_chunk:
+            yield first_chunk
+        yield from gen
+
+    headers = {
+        "X-Sample-Rate": str(sr),
+        "X-PCM-Format": "s16le",
+        "X-Chunk-Ms": str(chunk_ms),
+        "X-Deep-Stream": "glue_only",
+        "X-Code-Dump-Tag": request_tag,
+    }
+    return StreamingResponse(_iter_full(), media_type="audio/pcm", headers=headers)
+
+
 def _synthesize_stream_deep(req: TTSRequest):
     assert _deep_tokenizer is not None
     global _first_request_done
@@ -1690,6 +1827,15 @@ def _synthesize_stream_deep(req: TTSRequest):
     cached_pcm = None
     cached_sr = None
     packet_tokens = max(1, TTS_DEEP_STREAM_PACKET_TOKENS)
+    packet_schedule = TTS_DEEP_STREAM_PACKET_SCHEDULE
+    if packet_schedule not in ("fixed2", "adaptive2to8"):
+        packet_schedule = "fixed2"
+    if packet_schedule == "adaptive2to8" and packet_tokens != 2:
+        print(
+            f"[TTS_DEEP] packet_schedule=adaptive2to8 override packet_tokens={packet_tokens} -> 2"
+        )
+        sys.stdout.flush()
+        packet_tokens = 2
     left_context_frames = max(0, TTS_DEEP_STREAM_LEFT_CONTEXT)
     req_seed = _get_request_seed(req)
     metrics = {
@@ -1716,7 +1862,10 @@ def _synthesize_stream_deep(req: TTSRequest):
         t_first_packet_ready: Optional[float] = None
         t_first_decode_done: Optional[float] = None
         t_codegen_done: Optional[float] = None
+        t_last_audio: Optional[float] = None
         decode_ms_list: list[float] = []
+        decode_wall_ms_total = 0.0
+        codegen_iter_wall_ms = 0.0  # Q13: pure time in next(codes_iter)
         deadline = t_req_in + TTS_DEEP_STREAM_REQUEST_TIMEOUT_S
         use_incremental = TTS_DEEP_STREAM_INCREMENTAL
         incremental_decoder: Optional[IncrementalDecoder] = None
@@ -1728,6 +1877,10 @@ def _synthesize_stream_deep(req: TTSRequest):
         prefill_buf: list[tuple[torch.Tensor, object]] = []
         prefill_done = prefill_packets == 0
         decode_every = max(1, TTS_DEEP_STREAM_DECODE_EVERY)
+        decode_every_target = decode_every
+        if packet_schedule == "adaptive2to8":
+            decode_every = 1
+            decode_every_target = 1
         decode_every_buf: list[torch.Tensor] = []
         decode_every_count = 0
         decoder_stream = None
@@ -1741,6 +1894,7 @@ def _synthesize_stream_deep(req: TTSRequest):
             "pcm_samples_total": 0,
             "pcm_samples_max": 0,
         }
+        queue_wait_ms_list: list[float] = []
         silence_packets_limit = TTS_DEEP_STREAM_SILENCE_PACKETS
         if packet_tokens == 1:
             silence_packets_limit = TTS_DEEP_STREAM_SILENCE_PACKETS_P1
@@ -1751,6 +1905,7 @@ def _synthesize_stream_deep(req: TTSRequest):
         if packet1_enabled:
             packet1_sampler = _Packet1Sampler(request_tag)
         packet_idx = 0
+        packet_idx_total = 0
         phase_sync = None
         phase_supported = (
             TTS_DEEP_STREAM_SYNC_MODE == "phase"
@@ -1775,7 +1930,25 @@ def _synthesize_stream_deep(req: TTSRequest):
             incremental_decoder = IncrementalDecoder(
                 _deep_tokenizer, device=TTS_DEEP_STREAM_DEVICE, transformer_mode=mode
             )
+            # Install decoder CUDA Graph if enabled
+            _decoder_graph_accel = None
+            if TTS_DECODER_CUDAGRAPH:
+                try:
+                    from decoder_cudagraph import install_decoder_cudagraph
+                    _decoder_graph_accel = install_decoder_cudagraph(
+                        incremental_decoder,
+                        packet_tokens=TTS_DEEP_STREAM_PACKET_TOKENS,
+                    )
+                    if _decoder_graph_accel:
+                        print(f"[decoder_cudagraph] Installed decoder CUDA Graph accelerator "
+                              f"(pre_captured={_decoder_graph_accel._pre_captured})")
+                except Exception as e:
+                    print(f"[decoder_cudagraph] Failed to install: {e}")
+                    import traceback; traceback.print_exc()
             incremental_state = incremental_decoder.reset_state()
+            # Reset decoder graph step counter for new request
+            if hasattr(incremental_decoder, '_decoder_graph_step_count'):
+                incremental_decoder._decoder_graph_step_count = 0
             holdback_samples = TTS_DEEP_STREAM_INCREMENTAL_HOLDBACK
             if holdback_samples < 0:
                 try:
@@ -1807,6 +1980,15 @@ def _synthesize_stream_deep(req: TTSRequest):
                 metrics["model_ttfp_ms"] = (t_first_packet_ready - t_before_generate) * 1000.0
             if metrics["model_ttf_ms"] < 0 and t_before_generate and t_first_decode_done:
                 metrics["model_ttf_ms"] = (t_first_decode_done - t_before_generate) * 1000.0
+
+        def _maybe_update_schedule() -> None:
+            nonlocal decode_every, decode_every_target, decode_every_count
+            if packet_schedule != "adaptive2to8":
+                return
+            if decode_every_count != 0:
+                return
+            if decode_every != decode_every_target:
+                decode_every = decode_every_target
 
         def _decode_with_sync(codes_tensor: torch.Tensor, codes_event=None) -> np.ndarray:
             nonlocal incremental_state, decoder_stream, decoder_event_done, phase_sync
@@ -1892,12 +2074,13 @@ def _synthesize_stream_deep(req: TTSRequest):
             codes_tensor: torch.Tensor, codes_event=None
         ) -> Generator[bytes, None, None]:
             nonlocal t_first_packet_ready, t_first_decode_done, incremental_tail, incremental_emitted, silence_packets
-            nonlocal incremental_state, first_out
+            nonlocal incremental_state, first_out, decode_wall_ms_total, t_last_audio
             if t_first_packet_ready is None:
                 t_first_packet_ready = time.time()
             t_decode = time.time()
             audio_np = _decode_with_sync(codes_tensor, codes_event=codes_event)
             t_decode_done = time.time()
+            decode_wall_ms_total += (t_decode_done - t_decode) * 1000.0
             if t_first_decode_done is None:
                 t_first_decode_done = t_decode_done
             _record_decode((t_decode_done - t_decode) * 1000.0)
@@ -1950,6 +2133,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                 f"impl=paper cache_hit={str(cache_hit).lower()}"
                             )
                             sys.stdout.flush()
+                        t_last_audio = time.time()
                         yield chunk
         try:
             if cache_hit and cached_pcm and cached_sr:
@@ -1963,6 +2147,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                             f"segment=starter cache_hit=true chunk_ms={chunk_ms}"
                         )
                         sys.stdout.flush()
+                    t_last_audio = time.time()
                     yield chunk
 
             with _tts_lock:
@@ -2011,11 +2196,15 @@ def _synthesize_stream_deep(req: TTSRequest):
                             codes = next(codes_iter)
                         except StopIteration:
                             break
+                        t_wait_done = time.time()
+                        codegen_iter_wall_ms += (t_wait_done - t_wait) * 1000.0
                         if packet1_sampler is not None and TTS_DEEP_STREAM_PROCESS:
-                            wait_ms = (time.time() - t_wait) * 1000.0
+                            wait_ms = (t_wait_done - t_wait) * 1000.0
                             packet1_sampler.log_cons(wait_ms, -1)
                         if TTS_DEEP_STREAM_PACKET_TRACE:
-                            packet_trace["queue_wait_ms"] += (time.time() - t_wait) * 1000.0
+                            wait_ms = (t_wait_done - t_wait) * 1000.0
+                            packet_trace["queue_wait_ms"] += wait_ms
+                            queue_wait_ms_list.append(wait_ms)
                         if _check_deadline():
                             break
                         if cancel_event.is_set():
@@ -2067,6 +2256,19 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     continue
                                 codes_tensor = torch.stack(packet_buf, dim=0)
                                 packet_buf.clear()
+                                packet_idx_total += 1
+                                if packet_schedule == "adaptive2to8" and first_out is not None:
+                                    if packet_idx_total >= 4 and decode_every_target < 2:
+                                        decode_every_target = 2
+                                    if sr > 0 and incremental_emitted > 0 and t_before_generate is not None:
+                                        rtf_rolling = (time.time() - t_before_generate) / (
+                                            incremental_emitted / float(sr)
+                                        )
+                                        if rtf_rolling > 1.4 and decode_every_target < 8:
+                                            decode_every_target = 8
+                                        elif rtf_rolling > 1.2 and decode_every_target < 4:
+                                            decode_every_target = 4
+                                _maybe_update_schedule()
                                 if packet1_sampler is not None:
                                     packet_idx += 1
                                     packet1_sampler.log_packet_ready(packet_idx, time.time())
@@ -2080,6 +2282,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     codes_tensor = torch.cat(decode_every_buf, dim=0)
                                     decode_every_buf.clear()
                                     decode_every_count = 0
+                                    _maybe_update_schedule()
                                     packet_event_local = decode_every_event
                                     decode_every_event = None
                                 if not prefill_done:
@@ -2124,6 +2327,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                 codes_tensor, left_context_size=ctx, start_position=start_position
                             )
                             t_decode_done = time.time()
+                            decode_wall_ms_total += (t_decode_done - t_decode) * 1000.0
                             if t_first_decode_done is None:
                                 t_first_decode_done = t_decode_done
                             _record_decode((t_decode_done - t_decode) * 1000.0)
@@ -2222,6 +2426,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                             codes_tensor = torch.cat(decode_every_buf, dim=0)
                             decode_every_buf.clear()
                             decode_every_count = 0
+                            _maybe_update_schedule()
                             if t_first_packet_ready is None:
                                 t_first_packet_ready = time.time()
                             t_decode = time.time()
@@ -2298,6 +2503,7 @@ def _synthesize_stream_deep(req: TTSRequest):
                                     codes_tensor, left_context_size=ctx, start_position=start_position
                                 )
                                 t_decode_done = time.time()
+                                decode_wall_ms_total += (t_decode_done - t_decode) * 1000.0
                                 if t_first_decode_done is None:
                                     t_first_decode_done = t_decode_done
                                 _record_decode((t_decode_done - t_decode) * 1000.0)
@@ -2343,6 +2549,27 @@ def _synthesize_stream_deep(req: TTSRequest):
 
         t_done = time.time()
         _record_metrics()
+        # Q13: corrected wall time breakdown
+        # loop_wall_ms: full generate loop (codegen + decode + glue interleaved)
+        loop_wall_ms = -1.0
+        if t_before_generate is not None and t_codegen_done is not None:
+            loop_wall_ms = (t_codegen_done - t_before_generate) * 1000.0
+        # codegen_wall_ms (LEGACY, kept for compat): same as loop_wall_ms
+        codegen_wall_ms = loop_wall_ms
+        # codegen_iter_wall_ms: pure time waiting for next(codes_iter) (accumulated above)
+        # decode_wall_ms: always-on accumulated decode time (NOT gated on METRICS)
+        decode_wall_ms = decode_wall_ms_total if decode_wall_ms_total > 0 else -1.0
+        total_wall_ms = (t_done - t_before_generate) * 1000.0 if t_before_generate is not None else -1.0
+        # glue_wall_ms: residual = loop - codegen_iter - decode
+        glue_wall_ms = -1.0
+        if loop_wall_ms >= 0 and codegen_iter_wall_ms >= 0 and decode_wall_ms_total >= 0:
+            glue_wall_ms = max(0.0, loop_wall_ms - codegen_iter_wall_ms - decode_wall_ms_total)
+        # tail_wall_ms: time after loop (flush + final emit)
+        tail_wall_ms = -1.0
+        if t_codegen_done is not None:
+            tail_wall_ms = (t_done - t_codegen_done) * 1000.0
+        queue_wait_p95_ms = _percentile(queue_wait_ms_list, 0.95) if queue_wait_ms_list else -1.0
+        pcm_seconds_emitted = float(incremental_emitted) / float(sr) if sr > 0 else -1.0
         if (
             TTS_DEEP_STREAM_TRACE_TIMING
             and t_first_packet_ready
@@ -2379,7 +2606,10 @@ def _synthesize_stream_deep(req: TTSRequest):
         print(
             f"[TTS_DEEP] req_tag={request_tag} t_req_in={t_req_in:.6f} t_done={t_done:.6f} "
             f"total={(t_done - t_req_in):.3f} warm={warm_request} "
-            f"segments={len(segments)} chunk_ms={chunk_ms} packet_tokens={packet_tokens}"
+            f"segments={len(segments)} chunk_ms={chunk_ms} packet_tokens={packet_tokens} "
+            f"codegen_iter={codegen_iter_wall_ms:.1f}ms decode={decode_wall_ms_total:.1f}ms "
+            f"glue={glue_wall_ms:.1f}ms tail={tail_wall_ms:.1f}ms "
+            f"loop={loop_wall_ms:.1f}ms"
         )
         sys.stdout.flush()
         _first_request_done = True
@@ -2387,6 +2617,7 @@ def _synthesize_stream_deep(req: TTSRequest):
             codes_tensor = torch.cat(codes_all, dim=0)
             meta = {
                 "request_tag": request_tag,
+                "model_dir": TTS_DEEP_STREAM_MODEL_DIR,
                 "text": req.text,
                 "task_type": req.task_type,
                 "language": req.language,
@@ -2401,6 +2632,19 @@ def _synthesize_stream_deep(req: TTSRequest):
                 "seed_mode": TTS_DEEP_STREAM_SEED_MODE,
                 "process": TTS_DEEP_STREAM_PROCESS,
                 "impl": "paper",
+                # Q13: corrected timing breakdown (always-on, low-overhead)
+                "codegen_wall_ms": codegen_wall_ms,  # LEGACY: = loop_wall_ms (full loop)
+                "codegen_iter_wall_ms": codegen_iter_wall_ms,  # pure next(codes_iter) time
+                "decode_wall_ms": decode_wall_ms,  # always-on decode accumulator
+                "decode_wall_ms_total": decode_wall_ms_total,  # raw total (no -1 sentinel)
+                "loop_wall_ms": loop_wall_ms,  # full generate loop
+                "glue_wall_ms": glue_wall_ms,  # residual = loop - codegen_iter - decode
+                "tail_wall_ms": tail_wall_ms,  # time after loop (flush + emit)
+                "total_wall_ms": total_wall_ms,  # t_done - t_before_generate
+                "queue_wait_p95_ms": queue_wait_p95_ms,
+                "pcm_seconds_emitted": pcm_seconds_emitted,
+                "packet_schedule": packet_schedule,
+                "decode_every_final": decode_every,
             }
             if TTS_DEEP_STREAM_PACKET_TRACE:
                 meta["queue_wait_ms"] = float(packet_trace["queue_wait_ms"])
@@ -2425,6 +2669,20 @@ def _synthesize_stream_deep(req: TTSRequest):
                 meta["codebook_size"] = int(getattr(_deep_tokenizer.model.decoder.config, "codebook_size", 0) or 0)
             except Exception:
                 meta["codebook_size"] = 0
+            # CUDA Graph stats (if enabled)
+            if TTS_CODEGEN_CUDAGRAPH_TALKER or TTS_CODEGEN_CUDAGRAPH_CP:
+                try:
+                    from codegen_cudagraph import get_cudagraph_stats, reset_cudagraph_stats
+                    meta.update(get_cudagraph_stats())
+                    reset_cudagraph_stats()
+                except Exception:
+                    pass
+            # Decoder CUDA Graph stats
+            if TTS_DECODER_CUDAGRAPH and _decoder_graph_accel is not None:
+                try:
+                    meta.update(_decoder_graph_accel.get_stats_dict())
+                except Exception:
+                    pass
             _dump_codes(request_tag, codes_tensor, meta)
 
     left_ctx_header = TTS_DEEP_STREAM_LEFT_CONTEXT
@@ -2475,6 +2733,15 @@ def _synthesize_stream_deep(req: TTSRequest):
         yield from gen
 
     return StreamingResponse(_gen_with_first(), media_type="audio/pcm", headers=headers)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    host = os.environ.get("TTS_HOST", "0.0.0.0")
+    port = int(os.environ.get("TTS_PORT", "9000"))
+    uvicorn.run(app, host=host, port=port)
+
 
 
 if __name__ == "__main__":

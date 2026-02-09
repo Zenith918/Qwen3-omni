@@ -1,595 +1,360 @@
 # 研发日志
 
-## 2026-01-29 03:26 UTC
-步骤
-- 删除深度流式“滑窗重解”分支，仅保留增量解码（paper 路径）。
-- 增加服务端指标头：model_ttfp_ms / model_ttf_ms / server_ttfa_ms。
-- 回归对齐论文口径：记录 model_ttf & e2e_ttfa，强制 paper + packet_tokens=4，写入定义说明。
-- offline 超时默认提升到 600s；回归集缩为 base + 5 条（2 long、2 medium、1 short）。
-- 新增 `clients/texts_p0_base.json`、`clients/voices_base.json`，更新 `run_ci_regression.sh` 默认值。
-- 修复 `_synthesize_stream_deep` 里 first_chunk 变量未定义的异常。
-- 跑一轮回归（deep-stream + packet_tokens=4 + left_context=25）。
-
-结果
-- 回归结果：`output/regression/20260129_032345/summary.json`
-- 状态：FAIL（5/5 case 的 mae_waveform > 1e-3）
-- E2E TTFA P50：364.28 ms；Model TTF P50：359.03 ms；RTF P50：1.087
-
-## 2026-01-29 03:45 UTC
-步骤
-- 开启确定性生成：`TTS_DEEP_STREAM_DETERMINISTIC=1`。
-- 复跑回归（同样的 base-only 5 条集）。
-
-结果
-- 回归结果：`output/regression/20260129_034340/summary.json`
-- 状态：PASS（波形一致性恢复到 2.7e-05 量级）
-- E2E TTFA P50：344.78 ms；Model TTF P50：339.71 ms；RTF P50：1.040
-
-## 2026-01-29 06:40 UTC
-步骤
-- offline 改为直接波形生成：`TTS_DEEP_STREAM_OFFLINE_FROM_CODES=0`。
-- 保持确定性与 paper 路径，复跑回归。
-
-结果
-- 回归结果：`output/regression/20260129_063825/summary.json`
-- 状态：PASS
-- E2E TTFA P50：347.32 ms；Model TTF P50：342.09 ms；RTF P50：1.029
-
-## 2026-01-29 06:46 UTC
-步骤
-- 增大左上下文：`TTS_DEEP_STREAM_LEFT_CONTEXT=72`（同时保持 offline 直接波形）。
-- 复跑回归。
-
-结果
-- 回归结果：`output/regression/20260129_064415/summary.json`
-- 状态：PASS
-- E2E TTFA P50：356.42 ms；Model TTF P50：350.94 ms；RTF P50：1.048
-
-## 2026-01-29 06:47 UTC
-回滚基线（用于后续排查对比）
-- 启动参数：`TTS_DEEP_STREAM_DETERMINISTIC=1`，`TTS_DEEP_STREAM_OFFLINE_FROM_CODES=0`
-- `TTS_DEEP_STREAM_LEFT_CONTEXT=72`，`TTS_DEEP_STREAM_PACKET_TOKENS=4`
-- `TTS_STREAM_CHUNK_MS` 未设置（默认 30ms）
-
-## 2026-01-29 07:06 UTC
-步骤
-- 提高包大小：`TTS_DEEP_STREAM_PACKET_TOKENS=8`（其余保持 `LEFT_CONTEXT=72`、offline 直接波形、确定性）。
-- 复跑回归。
-
-结果
-- 回归结果：`output/regression/20260129_070412/summary.json`
-- 状态：FAIL（回归规则要求 packet_tokens=4，且 TTFA 回归超阈）
-- E2E TTFA P50：644.99 ms；Model TTF P50：638.84 ms；RTF P50：0.994
-- pop_click_score P50：0.0333（相较基线无明显改善）
-
-## 2026-01-29 07:18 UTC
-步骤
-- 回滚到基线参数：`TTS_DEEP_STREAM_PACKET_TOKENS=4`，`TTS_DEEP_STREAM_LEFT_CONTEXT=72`，`TTS_DEEP_STREAM_OFFLINE_FROM_CODES=0`。
-- 对比爆音位置：基线（20260129_064415） vs packet_tokens=8（20260129_070412）。
-
-结果
-- 爆音位置不稳定：基线与 packet_tokens=8 的尖峰对齐率（2ms 内）约 13%。
-- 结论：爆音位置随 packet size 改变，说明并非“固定音源缺陷”，更像解码过程的瞬态/数值不稳。
-
-## 2026-01-29 07:24 UTC
-步骤
-- 只改 chunk 大小：`TTS_STREAM_CHUNK_MS=40`（其余保持基线）。
-- 复跑回归并对比爆音位置。
-
-结果
-- 回归结果：`output/regression/20260129_072241/summary.json`（PASS，指标与基线近似）
-- 爆音位置完全一致（基线 vs chunk_ms=40 对齐率 100%），说明 chunk 大小不是根因。
-
-## 2026-01-29 07:46 UTC
-步骤
-- 关闭 deep-stream（`TTS_DEEP_STREAM_ENABLE=0`），尝试生成 non-deep offline。
-- long_03（read timeout=600）与 medium_01（read timeout=300）均超时。
-
-结果
-- non-deep offline 太慢，无法获得对比音频。
-- 记录：`output/debug/non_deep_long_03.wav` 未生成。
-
-## 2026-01-29 07:49 UTC
-步骤
-- 回滚到基线 deep-stream。
-- 生成爆音时间戳清单用于人工比对。
-
-结果
-- `output/debug/pop_times_long03_stream.txt`
-- `output/debug/pop_times_long03_offline.txt`
-
-## 2026-01-29 08:00 UTC
-步骤
-- 对比“直接波形 offline”（20260129_064415）与“codes→decode offline”（20260129_034340）的爆音位置。
-- 同时对比 stream vs offline 的爆音位置对齐度。
-
-结果
-- 爆音位置高度一致：code_offline vs direct_offline 对齐率约 95.7%（2ms 内）。
-- direct_offline vs stream 对齐率 100%。
-- 结论：爆音来自模型输出本身（code 生成/codec 输出），不是 streaming/packet/chunk 造成。
-
-## 2026-01-29 18:58 UTC
-步骤（P0）
-- 为 deep-stream 增加 codes 落盘与 hash：`TTS_CODE_DUMP_ENABLE=1` 时保存 `codes_*.pt` 与 `meta_*.json`。
-- 固定 `seed=42`、`deterministic=1`，同文本/voice 各跑 3 次：
-  - packet_tokens=4：`output/code_dumps/manifest_packet4.json`
-  - packet_tokens=8：`output/code_dumps/manifest_packet8.json`
-
-结果（P0）
-- 同配置 hash 100% 一致，跨配置 hash 也一致：
-  - sha256=`113984ff57fc128b702a07f2b1ad688aeb8b59a4f01bbb4cc583f8f09c5f7f4f`
-- 说明：codes 生成可复现，且与 packet_tokens 无关（在 deterministic + 固定 seed 下）。
-
-## 2026-01-29 18:58 UTC
-步骤（P1/P2）
-- 使用同一份 codes 做三种解码：
-  - A TRUE-OFFLINE：`tokenizer.decode(...)` 全量一次性 decode
-  - B CURRENT-STREAM：`decode_streaming` + left_context=72 + packet_tokens=4
-  - C WINDOW-ABLATION：`decode_streaming` + left_context=0
-- 输出文件：
-  - `output/debug/codes_1769711907843_aaca9fb4_A_full.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_B_stream.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_C_ctx0.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_metrics.json`
-  - `output/debug/codes_1769711907843_aaca9fb4_pop_code_stats.json`
-
-结果（P1）
-- pop_click_score：A=0.03285，B=0.03430，C=0.03568（数量级接近）。
-- 爆音位置对齐率（2ms）：
-  - A→B 约 10.6%
-  - A→C 约 10.9%
-  - B→C 约 90.6%
-- 初步结论：当前 streaming-style 解码与 true-offline 的爆音位置不一致，B/C 高度一致，指向“解码窗口/拼接策略”对爆音位置有强影响。
-
-结果（P2）
-- 12Hz frames_per_sec=12.5，已输出 top-20 爆音点的 code 跳变统计：
-  - `output/debug/codes_1769711907843_aaca9fb4_pop_code_stats.json`
-- 全局 code jump 分布（|c[t]-c[t-1]|，跨 codebook 汇总）：p95≈1570，p99≈1822，max≈2032。
-
-## 2026-01-29 20:51 UTC
-步骤（缓存增量解码 PoC）
-- 阅读 tokenizer/decoder 代码，确认 transformer 层支持 past_key_values，但 decode_streaming 未暴露。
-- 实现最小 PoC：在 transformer 使用 cache（past_key_values），conv/upsample 保持 windowed。
-- 脚本：`clients/tts_cached_decode_poc.py`
-  - 输出：full / cached incremental / current windowed 三个 wav
-  - 评估：pop_click_score + decode_ms（仅 decoder 侧）
-- 使用同一份 codes：`output/code_dumps/codes_1769711907843_aaca9fb4.pt`
-
-结果（PoC）
-- 输出文件：
-  - `output/debug/codes_1769711907843_aaca9fb4_A_full.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_B_cached.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_C_windowed.wav`
-  - `output/debug/codes_1769711907843_aaca9fb4_cached_metrics.json`
-- 指标（pop_click_score / decode_ms）：
-  - A_full: 0.03285 / 607ms
-  - B_cached: 0.03429 / 1472ms
-  - C_windowed: 0.03430 / 1643ms
-- 结论：cached incremental（仅 transformer 缓存）比 current windowed 略快（~10%），爆音指标相近。
-
-## 2026-01-29 21:54 UTC
-步骤（M1：stateful conv/upsample streaming）
-- 新增 stateful 流式解码器：`clients/tts_incremental_decoder.py`
-  - 1D causal conv streaming（buffer=kernel_size-1）
-  - transposed conv streaming（k=s 直接；k=2s 用前一帧配对输出）
-  - 状态结构：transformer cache/context + conv buffers + trans_prev
-- 更新 PoC 脚本：`clients/tts_cached_decode_poc.py`
-  - A_full_true：一次性 full decode（不走 chunked_decode）
-  - B_incremental：stateful conv/upsample + packet=4
-  - C_windowed：现有 windowed re-decode
-  - 输出 `output/debug/codes_1769711907843_aaca9fb4_incremental_metrics.json`
-
-结果（M1）
-- A_full_true vs B_incremental（packet=4）：
-  - pop_click_score：0.03286 vs 0.03292
-  - MAE：0.000238（达标）
-- B_incremental vs C_windowed：
-  - pop_click_score 有所下降（0.03292 < 0.03430）
-- 修正点：去掉“每包实时裁剪”，改为“流式输出 + 结束后裁剪尾部”，避免中途截断导致 MAE 偏大。
-
-## 2026-01-29 22:18 UTC
-步骤（M2 接入准备）
-- 将 stateful incremental 解码接入 `/tts/stream` deep 路径（默认关闭）：
-  - 新环境变量：`TTS_DEEP_STREAM_INCREMENTAL=1`
-  - transformer 模式可选：`TTS_DEEP_STREAM_INCREMENTAL_TRANSFORMER=cache|window|full`
-  - holdback 保护尾部：`TTS_DEEP_STREAM_INCREMENTAL_HOLDBACK`（默认用 decode_upsample_rate）
-- 流式输出策略：
-  - 每 packet 调用 `decode_incremental`，累计 tail
-  - 仅输出 `expected_samples - holdback`，结束后 flush 尾部
-  - 断连取消时不 flush
-
-结果（M2）
-- 代码已接入，默认不影响现有线上（需显式启用 env）。
-- 头信息新增：`X-Deep-Decode-Mode`（windowed / incremental:mode）。
-
-## 2026-01-29 22:52 UTC
-步骤（M2 回归对齐）
-- offline 端改为复用 streaming 路径收集 codes：
-  - `_generate_audio_np_deep` 在 incremental 模式下走 `_collect_codes_streaming`
-  - 取消 incremental 模式下 offline 的尾部静音裁剪（避免长度差）
-- streaming 端 max_new_tokens 对齐 offline 的 cap（`_estimate_max_frames`）
-- 增加 offline codes dump（便于与 streaming 对比）
-
-结果（M2 回归）
-- base-only 5 条回归仍 FAIL，MAE P50≈0.009，duration_diff 已归零。
-- 结论：差异来自 codes 不一致（非解码器）。
-
-验证（codes hash）
-- 同文案、同设置、deterministic=1 下，stream vs offline codes hash 不一致。
-- 同文案多次 stream 也不一致（差异 16 elements，通常为 1 帧）。
-- 推断：code 生成仍有 GPU 非确定性（cuBLAS/GEMM 相关），需更强确定性配置或复现同 codes 机制。
-
-## 2026-01-29 23:00 UTC
-步骤（确定性开关验证）
-- 新增 `TTS_DEEP_STREAM_DETERMINISTIC_STRICT=1`：启用 `torch.use_deterministic_algorithms` + 禁 TF32。
-- 结合 `CUBLAS_WORKSPACE_CONFIG=:4096:8` 测试：
-  - stream 连续两次 codes hash 完全一致；
-  - stream 与 offline codes hash 一致。
-- 但在流式回归中触发 CUDA device-side assert（indexSelect），导致 /tts/stream 断流、/synthesize 500。
-
-结论
-- 严格确定性可消除 codes 漂移，但当前实现会触发 CUDA assert，不可用于回归/线上。
-
-## 2026-01-29 23:03 UTC
-步骤（严格确定性只用于 codegen）
-- 增加 `TTS_DEEP_STREAM_DETERMINISTIC_STRICT_DECODER`，尝试仅在 codegen 进程启用 strict。
-- 仍出现 /tts/stream 断流（CUDA device-side assert），说明 strict 触发问题并未消除。
-
-结论
-- strict 模式目前不可用（无论作用于 codegen 还是 decoder），需另寻确定性方案。
-
-## 2026-01-30 01:28 UTC
-步骤（soft 确定性 & code dump 增强）
-- 增加 soft 级确定性开关（不启用 `use_deterministic_algorithms`）：
-  - `TTS_DEEP_STREAM_DETERMINISTIC_SOFT`
-  - `TTS_DEEP_STREAM_DETERMINISTIC_SOFT_DECODER`
-- codes dump 增加 `min_code/max_code/out_of_range_count/codebook_size` 统计。
-- 增加 `TTS_DEEP_STREAM_CODEGEN_DEVICE`（可让 codegen 走 CPU，仅用于回归/排查）。
-
-## 2026-01-30 03:06 UTC
-步骤（确定性实测 & 纠错）
-- 修正 `tts_server.py` 末尾多余 `port)` 语法错误。
-- worker 改为每次请求前重新设定随机种子；模型走 eval（`model.model.eval()`）。
-- 新增 `TTS_DEEP_STREAM_DETERMINISTIC_SINGLE_THREAD` 选项（控制 codegen 单线程）。
-- 新增 `TTS_DEEP_STREAM_VALIDATE_CODES` / `TTS_DEEP_STREAM_CLAMP_CODES`（越界检测/保护）。
-
-结果（P0 验证）
-- CPU codegen + single-thread：stream 两次 hash 一致（deterministic OK），但 offline hash 仍与 stream 不一致。
-- strict(GPU) + clamp：stream 两次 hash 一致（deterministic OK），offline hash 仍与 stream 不一致。
-
-结论
-- 目前 stream 内部可稳定复现，但 offline 与 stream 仍存在“同文不同码”的差异，需继续定位 codegen 路径差异或改用同一份 codes 对齐回归。
-
-## 2026-02-01 06:10 UTC
-Q1–Q30 关键结论（自解释版）
-说明：以下结论来自技术总监 Q1–Q30 的“只问问题”清单，目标是确定 drift（抖动）来源与并行 overlap 的影响链条。每条都给出“结论 + 证据位置/文件”。
-
-### Q1–Q3（进程/并行形态）
-- Q1：`TTS_DEEP_STREAM_PROCESS=1` 是**常驻 worker 进程**（不是每请求新进程）。
-  - 证据：`clients/tts_server.py` 中 worker 初始化逻辑（spawn + 常驻队列）。
-- Q2：multiprocessing start method 为 **spawn**。
-  - 证据：`clients/tts_server.py` 内 `mp.get_context("spawn")` 使用。
-- Q3：codegen worker 与 decoder 默认在**同一块 GPU**，且并行 overlap。
-  - 证据：server 启动 env（`TTS_DEEP_STREAM_CODEGEN_DEVICE` 默认同 `TTS_DEEP_STREAM_DEVICE`）；
-    `TTS_DEEP_STREAM_TRACE_TIMING` 日志显示 overlap（见 2026-01-31 03:45 UTC 记录）。
-
-### Q4–Q12（漂移形态与确定性）
-- Q4：`deterministic=1` 并不等于 greedy；策略由 `TTS_DEEP_STREAM_DETERMINISTIC_POLICY` 决定（seeded 仍采样）。
-  - 证据：`clients/tts_server.py` 中 deterministic policy 分支 + DEV_LOG 2026-01-30 06:10。
-- Q5：多进程漂移是**同文本两次请求 hash 不同**，且首个 diff 很早（常见 frame=4）。
-  - 证据：code dump meta + 后续 diff 统计（见 Q33/Q34 与 2026-01-31 03:45）。
-- Q6：漂移时**未出现 out_of_range/clamp**；min/max/out_of_range_count 一致。
-  - 证据：`output/code_dumps/meta_*.json` 的 `min_code/max_code/out_of_range_count`。
-- Q7/Q8：strict determinism 会触发 CUDA assert（indexSelectSmallIndex），**长文本更易触发**。
-  - 证据：server Traceback + `TTS_DEEP_STREAM_TRACE_POS` 日志（2026-01-31 03:45）。
-- Q9：process=0 无 overlap 变慢，TTFA 明显上升（见 Q31/Q32）。
-  - 证据：`output/debug/q31_process0_packet4.json`。
-- Q10：process=0 pop_click_score 变高并非 incremental decoder 本体退化。
-  - 证据：同 codes 的增量解码 PoC（`clients/tts_cached_decode_poc.py` 结果）。
-- Q11：流式路径实际使用的 decode 模式可从 `X-Deep-Decode-Mode` 头确认（windowed / incremental:cache|window|full）。
-  - 证据：`clients/tts_server.py` 输出 header 逻辑。
-- Q12：漂移“从很早开始”的结论复现（frame≈4 对应 ~0.32s）。
-  - 证据：code diff 统计与 Q33/Q34 结果。
-
-## 2026-01-31 00:22 UTC
-步骤（定位“多进程 vs 单进程”）
-- 关闭 codegen worker：`TTS_DEEP_STREAM_PROCESS=0`（同进程线程生成）
-- 保持 `deterministic=1` + `seed_mode=content`，跑 long_03 两次对比 hash
-
-### Q28–Q30（漂移方向）
-- Q28：overlap 条件下**codes hash 会变化**，音频变化与 codes 漂移高度相关。
-  - 证据：Q33/Q34 的 `hash_unique>1` 与 `first_diff_frame`。
-- Q29：logit 层面已观察到 tie/极小差异，提示数值扰动可翻转。
-  - 证据：Q20/Q23 记录（top1/top2 gap=0 或 Δlogit=0）。
-- Q30：漂移常在**极早帧出现**（frame≈4 或更早）。
-  - 证据：Q33/Q34 `first_diff_frame` 统计。
-
-## 2026-02-01 06:30 UTC
-背景（Q31–Q36 裁决实验）
-- 目标：用一组“强控制变量”的实验，回答以下关键问题：
-  - Q31：无 overlap（process=0）下 TTFA 的真实下限是多少？
-  - Q32：packet_tokens=2/1 是否能在无 overlap 下接近 350ms？
-  - Q33：overlap 是否在“首包之后再开启”就能稳定（hybrid overlap）？
-  - Q34：overlap 漂移到底由 decoder 的哪一段触发（pre_transformer vs conv/upsample）？
-  - Q35：漂移是否对数值精度敏感（bf16 vs fp32）？
-  - Q36：logit 层面最早差异出现在 step 0–100 的哪个位置？（未完成）
-- 关键判据：
-  - `hash_unique > 1` 代表同文多次请求 codes 不一致（抖动风险）。
-  - `first_packet_hash_unique` 代表首包是否稳定（用 `tmp_codes_analysis.py` 对比）。
-
-步骤（工具与 SOP）
-- 启动服务：`clients/tts_server.py` + 指定环境变量（见 `SKILL.md` SOP）。
-- 预热：`python3 clients/tts_codes_dump.py --text-id long_03`
-- 统计：`python3 tmp_ttfa_runs.py --text-id long_03 --count N --out ...`
-- 首包/首 diff 分析：`python3 tmp_codes_analysis.py --packet-tokens 4 --compare --tags <tag1> <tag2>`
-- 新增脚本：
-  - `tmp_codes_analysis.py`（full hash + first packet hash + first_diff_frame）
-- 修复脚本：
-  - `tmp_ttfa_runs.py` 增加 `meta_missing`/`fail_count`，避免 code dump 缺失导致 hang
-
-结果（Q31：无 overlap 基线）
-- 环境：`process=0` + `packet_tokens=4` + `left_context=72` + `incremental` + deterministic
-- 输出：`output/debug/q31_process0_packet4.json`
-- TTFA P50/P95：660.46 / 695.84 ms
-- code_ms P50/P95：315.62 / 338.31 ms
-- decode_first_ms P50/P95：341.58 / 380.70 ms
-- RTF P50/P95：1.567 / 1.597
-- hash_unique=1（稳定）
-- 结论：无 overlap + packet=4 远高于 350ms
-
-结果（Q32：packet_tokens=2/1）
-- packet=2
-  - 输出：`output/debug/q32_process0_packet2_v2.json`
-  - TTFA P50/P95：349.82 / 401.00 ms
-  - code_ms P50/P95：161.02 / 173.86 ms
-  - decode_first_ms P50/P95：188.90 / 227.91 ms
-  - RTF P50/P95：1.556 / 1.647
-  - hash_unique=1（稳定）
-  - 结论：P50 接近 350ms，但 P95 仍明显超标
-- packet=1（异常）
-  - 输出：`output/debug/q32_process0_packet1.json`
-  - TTFA P50/P95：40033.99 / 92013.27 ms（40–90s）
-  - code_ms P50/P95：39276.54 / 91828.40 ms
-  - decode_first_ms P50/P95：187.53 / 271.79 ms
-  - RTF P50/P95：7.11 / 12.88
-  - hash_unique=23（明显漂移）
-  - 伴随现象：frames≈135、音频仅 10–12s（显著短于正常 22s）
-  - 结论：packet=1 路径当前不可用（需要单独排查）
-
-结果（Q33：overlap 形态 A/B）
-- 方案 A（立即 overlap）：`TTS_DEEP_STREAM_PREFILL_PACKETS=0`
-  - 输出：`output/debug/q33A_process1_packet4.json`
-  - TTFA P50/P95：651.79 / 1138.02 ms
-  - RTF P50/P95：3.24 / 4.14
-  - hash_unique=25（漂移）
-  - 首包分析：`first_packet_hash_unique=2`，`first_diff_frame=0`
-  - 结论：首包即漂移
-- 方案 B（首包后 overlap）：`TTS_DEEP_STREAM_PREFILL_PACKETS=1`
-  - 输出：`output/debug/q33B_process1_prefill1_packet4.json`
-  - TTFA P50/P95：459.82 / 476.02 ms
-  - RTF P50/P95：1.055 / 1.079
-  - hash_unique=30（漂移仍在）
-  - 首包分析：`first_packet_hash_unique=1`，`first_diff_frame=8`
-  - 结论：prefill 能“推迟”漂移，但不能消除漂移
-
-结果（Q34：触发源定位，dummy decoder）
-- B0 codegen-only：稳定（已有结论，hash 不漂移）
-- B1 pre_transformer only：稳定
-  - `full_hash_unique=1`，`first_diff_frame=-1`
-- B2 conv/upsample only：漂移
-  - `full_hash_unique=2`，`first_diff_frame=4`
-- B3 full decoder：漂移
-  - `full_hash_unique=2`，`first_diff_frame=16`
-- 结论：漂移触发更偏向 conv/upsample 路径，不是 pre_transformer
-
-结果（Q35：精度敏感性，overlap）
-- D0（bf16）：`output/debug/q35_d0_bf16.json`
-  - TTFA P50/P95：463.54 / 490.97 ms
-  - hash_unique=20（全部漂移）
-- D1（codegen fp32）：`output/debug/q35_d1_codegen_fp32.json`
-  - TTFA P50/P95：468.22 / 489.83 ms
-  - hash_unique=20（漂移）
-- D2（decoder fp32）：`output/debug/q35_d2_decoder_fp32.json`
-  - TTFA P50/P95：437.87 / 452.87 ms
-  - hash_unique=20（漂移）
-- D3（codegen+decoder fp32）：`output/debug/q35_d3_both_fp32.json`
-  - TTFA P50/P95：440.73 / 459.36 ms
-  - hash_unique=20（漂移）
-- 结论：漂移对 FP32 不敏感，更像并行/调度级非确定性
-
-状态（Q36）
-- 已完成（step 0–100）：
-  - 使用 `TTS_CODEGEN_DEBUG_TOPK=1`，step 0–100 记录 top1/top2
-  - `tmp_topk_diff.py` 结果：两次 run **step 0–100 无任何 top1/top2 差异**
-    - req_id=6 vs 7（seed 相同、text_hash 相同）
-  - 但同一对请求的 codes 仍漂移：
-    - tags: `1769969064722_5f6ce504` vs `1769969088218_768ef956`
-    - `first_diff_frame=4`（`tmp_codes_analysis.py`）
-  - 结论：logit topK（0–100）层面未见差异，漂移可能发生在更深的采样/后处理环节，
-    或差异小于当前 topK 打印精度（需后续扩大日志精度或记录完整 logits）。
-
-## 2026-02-01 07:30 UTC
-步骤（为 Q37–Q43 增加最小实验开关）
-- 新增 cuDNN/TF32 精细开关（用于 Q37）：
-  - `TTS_CUDNN_BENCHMARK`
-  - `TTS_CUDNN_DETERMINISTIC`
-  - `TTS_CUDNN_ALLOW_TF32`
-  - `TTS_CUDA_MATMUL_ALLOW_TF32`
-  - `TTS_CUDNN_TRACE=1` 时打印 cudnn enabled/available/version
-- 新增 dummy 解码模式（用于 Q38b）：
-  - `TTS_DEEP_STREAM_DUMMY_DECODER=noop`（保留 pre_transformer，跳过 conv/upsample）
-  - 位置：`clients/tts_incremental_decoder.py`
-
-结论
-- 以上改动仅用于裁决实验，不改变默认主路径行为。
-
-## 2026-02-01 08:40 UTC
-结果（Q37：conv/upsample-only + overlap=true，10 runs each）
-固定条件：
-- 文本：short_01 + long_03
-- greedy：`TTS_DEEP_STREAM_DETERMINISTIC_POLICY=greedy`
-- 固定 seed：`TTS_DEEP_STREAM_SEED_MODE=fixed` + `TTS_DEEP_STREAM_SEED=42`
-- decoder：`TTS_DEEP_STREAM_DUMMY_DECODER=conv_only`
-
-### Q37 baseline（默认 flags）
-- long：`output/debug/q37_baseline_long.json`
-  - TTFA P50/P95：435.06 / 464.38 ms
-  - hash_unique=10，first_diff_frame=12
-- short：`output/debug/q37_baseline_short.json`
-  - TTFA P50/P95：430.97 / 443.45 ms
-  - hash_unique=5，first_diff_frame=4
-
-### Q37.benchmark=False
-- long：`output/debug/q37_benchmark0_long.json`
-  - TTFA P50/P95：435.36 / 441.37 ms
-  - hash_unique=10，first_diff_frame=4
-- short：`output/debug/q37_benchmark0_short.json`
-  - TTFA P50/P95：426.16 / 445.62 ms
-  - hash_unique=4，first_diff_frame=-1（首两次未发现差异，但整体仍漂移）
-
-### Q37.cudnn_deterministic=True（benchmark=False）
-- long：`output/debug/q37_cudnn_deterministic_long.json`
-  - TTFA P50/P95：440.42 / 457.80 ms
-  - hash_unique=10，first_diff_frame=4
-- short：`output/debug/q37_cudnn_deterministic_short.json`
-  - TTFA P50/P95：434.14 / 455.40 ms
-  - hash_unique=7，first_diff_frame=4
-
-### Q37.TF32 off（cudnn det + benchmark=0 + allow_tf32=0）
-- long：`output/debug/q37_tf32off_long.json`
-  - TTFA P50/P95：23572 / 24079 ms
-  - hash_unique=10，first_diff_frame=8
-- short：`output/debug/q37_tf32off_short.json`
-  - TTFA P50/P95：1434.93 / 1639.13 ms
-  - hash_unique=7，first_diff_frame=4
-
-结论（Q37）
-- cudnn benchmark/deterministic 的切换**不消除漂移**（hash_unique 仍 >1）
-- 关闭 TF32 会显著拉长 TTFA（到秒/十秒级），但**漂移仍在**
-
-## 2026-02-01 09:40 UTC
-结果（Q38：decoder 路径归因）
-Q38a：decoder 强制 CPU（codegen 仍在 GPU）
-- 启动参数：`TTS_DEEP_STREAM_DEVICE=cpu`, `TTS_DEEP_STREAM_CODEGEN_DEVICE=cuda:0`
-- 两次请求 tags：
-  - `1769980005765_48b08abd`, `1769980131382_af8a1584`
-- `tmp_codes_analysis.py`：
-  - full_hash_unique=2（整体 codes 不同）
-  - first_packet_hash_unique=1
-  - first_diff_frame=-1（前缀一致，差异可能在尾部长度）
-- 结论：decoder CPU 并未阻止 codes 漂移（codes 仍变化）
-
-Q38b：decoder 在 GPU，但 conv/upsample 置为 noop
-- 启动参数：`TTS_DEEP_STREAM_DUMMY_DECODER=noop`
-- 两次请求 tags：
-  - `1769981265768_e9b633b0`, `1769981290898_6b79f962`
-- `tmp_codes_analysis.py`：
-  - full_hash_unique=1（codes 完全一致）
-  - first_diff_frame=-1
-- 结论：**conv/upsample 路径参与时才触发漂移**；noop 时漂移消失
-
-
-## 2026-02-02 00:05 UTC
-结果（Q39：显式同步）
-- 配置：`TTS_DEEP_STREAM_SYNC_MODE=sync`（process=0，同进程同步）
-- long_03：`output/debug/q39_sync_long.json`
-  - TTFA P50/P95：608.998 / 665.234 ms
-  - hash_unique=1（稳定）
-- short_01：`output/debug/q39_sync_short.json`
-  - TTFA P50/P95：633.263 / 649.975 ms
-  - hash_unique=1（稳定）
-- 备注：目前仅验证显式同步（sync），尚未实现“独立 stream + event wait”的 Q39b
-
-## 2026-02-02 00:52 UTC
-结果（Q37.1：cudnn 可用性）
-- 环境输出：
-  - cudnn_enabled=True, cudnn_available=True, cudnn_version=91002
-  - cudnn_benchmark=False, cudnn_deterministic=False, cudnn_allow_tf32=True
-  - conv1d_out=(1, 32, 98), convtranspose1d_out=(1, 8, 202)
-- 结论：cudnn 可用且 conv1d/convtranspose 能在 GPU 上正常执行
-
-## 2026-02-02 00:10 UTC
-结果（Q40：降低 decoder 触发频率）
-- 配置：`TTS_DEEP_STREAM_DECODE_EVERY=2`，`TTS_DEEP_STREAM_DUMMY_DECODER=conv_only`
-- long_03：`output/debug/q40_decode_every2_long.json`
-  - TTFA P50/P95：849.11 / 1244.12 ms
-  - hash_unique=10，first_diff_frame=8
-- short_01：`output/debug/q40_decode_every2_short.json`
-  - TTFA P50/P95：2062.65 / 2261.32 ms
-  - hash_unique=3，first_diff_frame=8
-- 结论：降低解码频率会推迟漂移（diff_frame=8），但仍不能消除漂移且 TTFA 明显变差
-
-## 2026-02-02 00:25 UTC
-结果（Q41：packet=1 异常定位，packet_trace）
-- 配置：`process=0`, `packet_tokens=1`, `TTS_DEEP_STREAM_PACKET_TRACE=1`
-- 输出：`output/debug/q41_packet1_long.json`
-- meta（tag: `1769991705617_00de68a5`）：
-  - code_ms=20464.94 ms, decode_first_ms=152.29 ms, ttfa_ms=20887.52 ms
-  - queue_wait_ms=11680.29, decode_calls=141
-  - codes_frames_max=1, pcm_samples_total=270165, pcm_samples_max=1920
-- meta（tag: `1769991760070_2c691ff4`）：
-  - code_ms=43753.83 ms, decode_first_ms=204.50 ms, ttfa_ms=44407.66 ms
-  - queue_wait_ms=13692.64, decode_calls=141
-  - codes_frames_max=1, pcm_samples_total=270165, pcm_samples_max=1920
-- 结论：packet=1 时主要卡在 codegen（code_ms 20–44s），decode 本身很快
-
-## 2026-02-02 00:38 UTC
-结果（Q42：packet=1 codegen-only）
-- 使用脚本：`tmp_codegen_only_stream.py`（不走 decoder）
-- 输出：`output/debug/q42_codegen_only_packet1.json`
-- long_03：
-  - run0：first_packet_ms=652.57, total_ms=23851.11, frames=305
-  - run1：first_packet_ms=83.96, total_ms=23233.24, frames=305
-  - hash_unique=1（codes 稳定）
-- 结论：codegen-only 没有出现 40–90s 卡死，说明 packet=1 异常更可能来自解码/拼接链路
-
-## 2026-02-02 00:44 UTC
-结果（Q43：decode-only，packet=1 喂固定 codes）
-- 固定 codes：tag `1769915670616_7828eb21`（来自 packet=2 稳定 run）
-- 输出（内联脚本）：
-  - frames=278, upsample=1920
-  - samples_total=533205, samples_expected=533760（短 555）
-  - samples_max=1920, samples_min=1365
-  - bad_len_calls=1, zero_calls=0
-  - decode_ms_sum=12732.40, decode_ms_p50=44.13
-- 结论：packet=1 decode 基本线性，但存在尾部长度不足的单次输出（需继续确认拼接逻辑）
-
-## 2026-02-02 01:45 UTC
-决策表
-- 输出：`output/debug/decision_table.md`
-
-## 2026-02-02 06:05 UTC
-结果（Q39b：CUDA event 最小同步）
-- 代码改动（可回滚，默认关闭）：
-  - `TTS_DEEP_STREAM_SYNC_MODE=event` 时在 codegen 侧记录 CUDA event，并在 decoder 侧单独 stream 等待
-  - 仅对 `process=0`（同进程）有效；跨进程无法共享 CUDA event
-- 配置：
-  - `process=0`, `packet_tokens=4`, `left_context=72`
-  - `TTS_DEEP_STREAM_INCREMENTAL=1`
-  - `TTS_DEEP_STREAM_DETERMINISTIC=1`, `policy=greedy`, `seed=42`
-  - `TTS_DEEP_STREAM_SYNC_MODE=event`
-- long_03：`output/debug/q39b_event_long.json`
-  - TTFA P50/P95：620.908 / 628.707 ms
-  - code_ms P50/P95：290.315 / 296.978 ms
-  - decode_first_ms P50/P95：330.315 / 334.981 ms
-  - RTF P50/P95：1.425 / 1.437
-  - hash_unique=1
-  - `tmp_codes_analysis.py`：first_diff_frame=-1（稳定）
-- short_01：`output/debug/q39b_event_short.json`
-  - TTFA P50/P95：618.962 / 686.446 ms
-  - code_ms P50/P95：289.860 / 310.106 ms
-  - decode_first_ms P50/P95：327.882 / 376.195 ms
-  - RTF P50/P95：1.557 / 13.794（存在 1 次异常长尾）
-  - hash_unique=1
-  - `tmp_codes_analysis.py`：first_diff_frame=-1（稳定）
-- 异常细节（需留意）：
-  - short_01 的 `idx=1`（tag `1770011831984_8c8bf955`）`total_s=15.13s` 导致 RTF P95 异常偏高，疑似队列等待或短暂 stall
-- 结论：event 同步在同进程下可消除漂移；TTFA 与 sync 模式接近，但不适用于 `process=1` 跨进程并发
-
-## 2026-02-02 06:12 UTC
-结果（Q37.1：cudnn profiler 佐证）
-- 输出：`output/debug/q37_1_cudnn_profile.json`
-- profiler 关键项：
-  - `aten::cudnn_convolution`
-  - `aten::cudnn_convolution_transpose`
-- 结论：conv1d/convtranspose1d 在当前环境走 cudnn
+---
+
+## Phase 1: Deep Streaming 基础建设 (2026-01-29)
+
+### 1.1 参数调优与基线确立
+
+| 日期 | 变更 | TTFA P50 | RTF P50 | MAE | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| 01-29 03:26 | 初始 deep-stream, packet=4, left_context=25 | 364ms | 1.087 | >1e-3 | ❌ FAIL |
+| 01-29 03:45 | +确定性 `DETERMINISTIC=1` | 345ms | 1.040 | 2.7e-05 | ✅ PASS |
+| 01-29 06:40 | +offline 直接波形 `OFFLINE_FROM_CODES=0` | 347ms | 1.029 | — | ✅ PASS |
+| 01-29 06:46 | +左上下文 `LEFT_CONTEXT=72` | 356ms | 1.048 | — | ✅ PASS |
+| 01-29 07:06 | packet=8（实验） | 645ms | 0.994 | — | ❌ TTFA 过高 |
+
+**结论**：最终基线 = `packet_tokens=4, LEFT_CONTEXT=72, DETERMINISTIC=1`。packet=8 虽降 RTF 但 TTFA 不可接受。
+
+### 1.2 爆音(Pop Noise)根因定位
+
+| 实验 | 结论 |
+| --- | --- |
+| 不同 packet_tokens 爆音对齐率 | 仅 13%，爆音随 packet 变化 → 非固定音源缺陷 |
+| chunk_ms=40 vs 默认 | 爆音 100% 对齐 → chunk 大小不是根因 |
+| code_offline vs direct_offline | 对齐率 95.7% → **爆音来自模型输出本身（codes）** |
+| stream vs offline 爆音 | streaming-style 解码与 true-offline 爆音位置不一致，B/C 高度一致 → "解码窗口/拼接策略"是强影响因素 |
+
+### 1.3 Codes 确定性验证
+
+- `seed=42, deterministic=1` 下同配置 codes hash 100% 一致，跨 packet_tokens 也一致。
+- **codes 生成可复现，与 packet_tokens 无关。**
+
+### 1.4 增量解码器实现 (M1)
+
+- 新增 `tts_incremental_decoder.py`：causal conv streaming + transposed conv streaming。
+- A_full vs B_incremental MAE = 0.000238（达标）。
+- 接入 `/tts/stream` 路径，环境变量 `TTS_DEEP_STREAM_INCREMENTAL=1` 启用。
+
+### 1.5 Codes 漂移问题
+
+- stream vs offline codes hash 不一致，多次 stream 也不一致（常差 1 帧）。
+- 严格确定性 (`DETERMINISTIC_STRICT=1`) 可消除漂移，但触发 **CUDA device-side assert**（长文本更易触发），不可用。
+- soft 确定性可保证 stream 内部可复现，但 stream vs offline 仍有差异。
+
+---
+
+## Phase 2: 漂移根因定位 (2026-02-01 ~ 2026-02-02)
+
+### 2.1 进程/并行形态 (Q1-Q3)
+
+- `PROCESS=1` 使用常驻 worker 进程（spawn），codegen 与 decoder 默认同一 GPU。
+- 主线程和 worker 线程使用 **同一个 default CUDA stream (0x0)**，GPU 上严格串行。
+
+### 2.2 无 overlap 基线 (Q31-Q32)
+
+| 配置 | TTFA P50 | TTFA P95 | RTF P50 | hash_unique |
+| --- | --- | --- | --- | --- |
+| process=0, packet=4 | 660ms | 696ms | 1.567 | 1（稳定） |
+| process=0, **packet=2** | **350ms** | **401ms** | 1.556 | 1（稳定） |
+| process=0, packet=1 | 40s+ | 92s+ | 7.11 | 23（异常） |
+
+**结论**：packet=2 是 TTFA 接近 350ms 的最优选择。packet=1 路径异常（codegen 阶段卡死）。
+
+### 2.3 漂移触发源 (Q34, Q38)
+
+| 实验 | hash_unique | 结论 |
+| --- | --- | --- |
+| codegen-only | 1（稳定） | codegen 本身不漂移 |
+| pre_transformer only | 1（稳定） | — |
+| **conv/upsample only** | **2（漂移）** | **漂移触发源** |
+| full decoder | 2（漂移） | — |
+| decoder 走 noop | 1（稳定） | conv/upsample 路径参与时才触发 |
+
+### 2.4 精度/cuDNN 实验 (Q35, Q37)
+
+- bf16 / codegen fp32 / decoder fp32 / 全 fp32 → **全部仍漂移**。
+- cudnn benchmark/deterministic 切换 → **不消除漂移**。
+- 关闭 TF32 → TTFA 飙升到秒/十秒级，**漂移仍在**。
+- **结论：漂移对精度不敏感，更像并行/调度级非确定性。**
+
+### 2.5 同步方案 (Q39)
+
+| 方案 | hash_unique | TTFA P50 | 适用性 |
+| --- | --- | --- | --- |
+| sync（显式同步） | 1 ✅ | 609-633ms | 消除漂移但 TTFA 高 |
+| event（CUDA event 等待） | 1 ✅ | 619-621ms | 同进程有效，跨进程不适用 |
+| 无同步（默认 overlap） | >1 ❌ | 435-464ms | 有漂移 |
+
+**结论**：同步可消除漂移，但 TTFA 代价过高。最终选择 `process=0 + packet=2 + phase sync` 作为产品配置。
+
+---
+
+## Phase 3: 性能瓶颈分析与路线裁决 (2026-02-06 ~ 2026-02-07)
+
+### 3.1 项目口径确立 (Q-A~Q-F)
+
+- 合法 baseline：gp=0。gp=auto 不承认（codec frame=0 分叉 + 听感崩）。
+- attention backend 必须用 profiler 证据，不能靠代码推断。
+- 低开销 always-on 计时拆分（不使用 METRICS=1 避免污染性能）。
+- `codegen_wall_ms` 定义明确拆分：纯 codegen-only / 纯 decode-only / glue。
+
+### 3.2 端到端计时拆分 (Q13, 1.7B)
+
+实现了 `codegen_iter_wall_ms` / `decode_wall_ms` / `glue_wall_ms` / `loop_wall_ms` / `tail_wall_ms` / `total_wall_ms` 六桶拆分。
+
+| 分量 | short_01 (%) | long_03 (%) |
+| --- | --- | --- |
+| codegen_iter | 43.5% | 33.6% |
+| decode | 53.8% | 65.4% |
+| glue | 2.7% | 1.0% |
+
+> ⚠️ 此拆分后被 D1-D6 修正（`cuda.synchronize()` 导致 decode 桶膨胀）。
+
+### 3.3 Kernel 分析 (Q-C, 1.7B)
+
+| 指标 | 值 |
+| --- | --- |
+| `pytorch_flash::flash_fwd_kernel` | 0.24% CUDA 时间（仅 prefill） |
+| `gemvx`（eager GEMV） | 47% CUDA 时间（decode 主体） |
+| **`cudaLaunchKernel` 次数** | **661,416（6,614/frame）** |
+| **CPU launch 时间占比** | **75.9%** |
+
+**结论**：CPU kernel launch overhead 是性能瓶颈，不是 attention 计算本身。
+
+### 3.4 SDPA/flash 裁决 (Q21, D3) ❌ 放弃
+
+- 实验显示 eager vs sdpa codegen RTF 差异 +21%。
+- **D3 修正**：monkey-patch `F.scaled_dot_product_attention` 计数发现两种模式调用次数**完全相同（31752 次）**。模型内部 attention module `config._attn_implementation` 始终为 `'sdpa'`，**无论顶层设置什么都走 SDPA 路径**。
+- **结论：模型始终使用 SDPA，"eager" vs "sdpa" 差异为测量噪声。此路线不可评估，放弃。**
+
+### 3.5 torch.compile 裁决 (Q22, D4) ❌ 放弃
+
+- 实验显示 compile 后 codegen RTF +17%，kernel launches 零减少。
+- **D4 修正**：TorchDynamo 追踪的 frame 数 = **0**，Inductor/Triton kernel = **0**。Dynamo 从 `generate()` 入口遇到 `while` 循环、stopping criteria、dynamic KV cache 即 graph break，**什么都没编译**。
+- **结论：torch.compile 在 HF generate() 框架下完全不适用，放弃。**
+
+### 3.6 D1-D6 关键修正
+
+> ⚠️ 以下修正了 Q13-Q23 的多个关键计量错误。
+
+**D1: cuda.synchronize() 计时偏差**
+
+隔离测量（long_03, 1.7B, 308 frames）:
+
+| 组件 | 独立 wall 时间 | RTF | 真实占比 |
+| --- | --- | --- | --- |
+| **codegen** | 22407ms | **0.909** | **69.3%** |
+| decode | 9922ms | **0.403** | 30.7% |
+
+原 Q19 报告 "decode 占 71.1%" 是由 `cuda.synchronize()` 捕获 codegen kernel 导致的假值。
+
+**D5: decode-only 真实 RTF**
+
+| 模式 | RTF | 结论 |
+| --- | --- | --- |
+| decode-only (incremental) | **0.398** | ✅ < 0.7，**decode 不是瓶颈** |
+| decode-only (batch) | 0.357 | 增量开销 11.5% |
+
+**核心修正**：
+
+| 原始结论 | 修正后 |
+| --- | --- |
+| "decode 占 71.1%，是瓶颈" | **codegen 占 69.3%，是瓶颈** |
+| "decode RTF=1.065 > 0.7，单卡不可行" | **decode RTF=0.398 < 0.7，瓶颈在 codegen** |
+| "SDPA 退化 21%" | 两种模式走同一路径，无法评估 |
+| "compile 退化 17%" | compile 零 tracing，什么都没做 |
+
+### 3.7 修正后的可行性分析
+
+**单卡 RTF < 0.7 = 有条件可行：**
+1. codegen/decode 并行化（双 CUDA stream 或双卡）
+2. codegen RTF 从 0.91 降至 < 0.7（≥23% 优化）
+3. 主攻方向：kernel launch 开销（CPU 占 89%）
+
+---
+
+## Phase 4: 模型修正 + 优化路线评估 (2026-02-07)
+
+### 4.1 🔴 严重修正：模型从 1.7B 改回 0.6B (19:15 UTC)
+
+用户试听发现"语气太怪"，核对历史启动命令发现：**从 Q13 以来一直用 1.7B，用户正确基线是 0.6B**。
+
+- D1-D6 所有实验结果**仅对 1.7B 有效**，需用 0.6B 重做。
+- 修复 `tts_regression_suite.py` `run_stream()` bug：fast 模式不读取 stream 数据。
+- 修复脚本文件污染（重复追加 19 份 `if __name__` 块）。
+
+### 4.2 黄金基线 v2 (0.6B) ✅
+
+**产物**: `output/regression/20260207_192126/`（已被 v3 取代，保留供参考）
+
+| 指标 | P50 | P95 | 目标 | 状态 |
+| --- | --- | --- | --- | --- |
+| **TTFA** | 332ms | 335ms | ≤350ms | ✅ |
+| **RTF** | 1.510 | 1.538 | <0.7 | ❌ 需 2.16x |
+| MAE | 2.6e-05 | 2.7e-05 | — | ✅ |
+| SNR | 64.2dB | 64.8dB | — | ✅ |
+| 确定性 | 10 runs bit-exact | — | hash_unique=1 | ✅ |
+
+### 4.3 P1 Benchmark: 0.6B 三路分解
+
+| Component | long_03 RTF P50 | Launches/Frame |
+| --- | --- | --- |
+| stream (端到端) | **1.476** | — |
+| codegen-only | **0.893** | **6,624** |
+| decode-only | **0.442** | — |
+
+分解 (long_03):
+```
+stream RTF = 1.476
+├── codegen-only RTF = 0.893 (21.78s) → 60.5%
+├── decode-only  RTF = 0.442 (10.78s) → 29.9%
+└── glue+HTTP    RTF ≈ 0.141 (3.34s)  →  9.6%
+```
+
+### 4.4 三条优化路线评估
+
+| 路线 | 理论收益 | 工程量 | 风险 | 建议 |
+| --- | --- | --- | --- | --- |
+| **1. vLLM/TRT-LLM** | 高(2-3×) | 极高(2-4周) | 致命阻碍：嵌套 generate | ⏸️ 暂缓 |
+| **2. CUDA Graph per-step** | 极高(30× launch↓) | 中(1-2周) | 中：StaticCache 兼容性 | 🟢 **P0 优先** |
+| **3. INT8/FP8 量化** | 低(5%单独) | 极低(1-2天) | 低 | 🟢 **P1 补刀** |
+
+**路线 2 核心思路**：不用 torch.compile，手动将 talker/code_predictor 的单步 forward 捕获为 CUDA Graph，在 Python generate 循环中以 `graph.replay()` 替代逐 kernel 发射。
+
+**路线 2 关键技术难点**：
+- DynamicCache 每步 `torch.cat()` 导致地址变化 → 需 StaticCache 或 monkey-patch
+- mRoPE 动态 ops → 需 pre-compute
+- 模型声明 `_supports_static_cache = False` → 需验证
+
+**路线 3 关键论点**：当前瓶颈是 kernel launch overhead（89%），量化只减少 kernel compute time（11%），单独使用仅改善 ~5%。但 CUDA Graph 后瓶颈转为 compute → 量化可叠加 15-20%。
+
+---
+
+## Phase 5: CUDA Graph 实现与验收 (2026-02-07 ~ 2026-02-08)
+
+### 5.1 P2: 最小可行性验证 ✅
+
+**核心创新**：用 monkey-patched `DynamicCache`（预分配静态缓冲区 + in-place `copy_()` 的 `update()`）绕过 `_supports_static_cache=False`。
+
+**(A) Talker 单步 forward ✅**
+
+| 指标 | Eager | Graph | 改善 |
+| --- | --- | --- | --- |
+| Hash | — | ✅ bit-exact | — |
+| Kernel launches | 1,754 | 56 | **31.3x** |
+| 单步时延 | 21.68ms | 3.76ms | **5.77x** |
+
+**(B) Code Predictor 单步 forward ✅**
+
+| 指标 | Eager | Graph | 改善 |
+| --- | --- | --- | --- |
+| Hash | — | ✅ bit-exact | — |
+| Kernel launches | 299 | 10 | **29.9x** |
+| 单步时延 | 3.68ms | 0.65ms | **5.65x** |
+
+**(C) CP 14-步 decode 批量 ✅**
+
+| 指标 | Eager | Graph | 改善 |
+| --- | --- | --- | --- |
+| 总时延 | 54.49ms | 10.39ms | **5.24x** |
+| 总 launches | 4,469 | 140 | **31.9x** |
+
+**技术关键发现**：
+1. `torch.inference_mode()` 不兼容 CUDA Graph，必须用 `torch.no_grad()`
+2. DynamicCache 可通过预分配 buffer + in-place `copy_()` 的 monkey-patch 兼容 graph capture
+3. CP 有 15 组 embedding/lm_head (0..14)，需 per-step 独立 graph
+4. Prefill 仍需 eager（输入形状不同），但仅占总时间 ~7%
+
+### 5.2 P3: 工程化集成
+
+**核心实现 (`codegen_cudagraph.py`)**：
+- 两个独立 flag：`TTS_CODEGEN_CUDAGRAPH_TALKER=0|1`, `TTS_CODEGEN_CUDAGRAPH_CP=0|1`
+- **CPGraphAccelerator**：14 个 per-step CUDA Graph，共享同一 frozen cache（关键修复：独立 cache 时 graph N 写入的 KV 对 graph N+1 不可见）
+- **TalkerGraphAccelerator**：使用 `GraphFriendlyCache`，但存在 bit-exact 问题
+- 安全机制：形状不匹配自动 fallback → eager
+
+**Codegen-Only 端到端 Benchmark**：
+
+| Group | RTF | Launches/Frame | BitExact | Speedup |
+| --- | --- | --- | --- | --- |
+| baseline (eager) | 0.893 | 6,669 | ✅ | 1.00x |
+| talker=1, cp=0 | 0.815 | 4,923 | ❌ | 1.10x |
+| **talker=0, cp=1** | **0.454** | **2,219** | **✅** | **1.97x** |
+| talker=1, cp=1 | 0.244 | 473 | ❌ | 3.66x |
+
+**决策：✅ PROCEED — CP-only CUDA Graph**
+- CP-only: RTF 0.45, **bit-exact**, 100% graph used rate
+- Talker Graph 不 bit-exact（frame count 变化 305→309），暂不启用
+
+### 5.3 Talker Graph Bit-Exactness 调查
+
+**根本原因**（两个独立 bug）：
+
+1. `DynamicLayer.get_seq_length()` 对全尺寸 buffer 报告错误长度 → causal mask 大小错误
+2. 全 buffer attention 有固有数值差异（IEEE 754 浮点舍入，不可消除）
+
+| Test | 方法 | vs Baseline |
+| --- | --- | --- |
+| frozen_cache eager (sliced, WITH gsl fix) | 切片返回 + get_seq_length 修复 | ✅ bit-exact |
+| frozen_cache eager (full buf, WITH gsl fix) | 全 buffer + get_seq_length 修复 | ❌ 数值差异 |
+
+**结论**：CUDA Graph 要求固定大小张量 → 必须全 buffer → 固有数值差异 → **Talker CUDA Graph 无法 bit-exact**。保持 Talker eager。
+
+### 5.4 P3.4/P3.5: Regression 验收 ✅ ALL PASS
+
+**Fast Regression (CP-only)**:
+
+| Gate | Value | Threshold | Status |
+| --- | --- | --- | --- |
+| TTFA P95 | 204ms | ≤350ms | ✅ |
+| SNR vs Baseline | **120.0 dB** | ≥15 dB | ✅ |
+| Determinism | hash_unique=1, 3 runs | =1 | ✅ |
+| Duration Diff P95 | 23.1ms | ≤50ms | ✅ |
+| Repeat Count | 0 | ≤0 | ✅ |
+
+**Full Regression (CP-only, 10 runs)**:
+
+| Metric | P50 | P95 |
+| --- | --- | --- |
+| TTFA | 212ms | 230ms |
+| RTF (端到端) | 0.887 | 0.980 |
+| SNR vs Baseline | 120.0 dB | 120.0 dB |
+| Determinism | hash_unique=1 (long_03 + short_01, 10 runs each) | ✅ |
+
+**SNR 120dB** = 波形与 gold baseline 近乎 bit-exact（MAE ≈ 浮点精度噪底）。
+
+**推荐配置**：
+```bash
+TTS_CODEGEN_CUDAGRAPH_CP=1
+TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 待 bit-exact 修复
+```
+
+---
+
+## 关键结论汇总
+
+### 性能瓶颈
+1. **Codegen 是吞吐瓶颈**（RTF 0.89，占 stream wall 60%），decode 不是（RTF 0.44）
+2. 瓶颈类型 = **kernel launch overhead**（6,624 launches/frame, CPU 89% 时间在 `cudaLaunchKernel`）
+3. SDPA/flash 无法切换（模型内部始终走 SDPA），torch.compile 不适用（dynamo 零 tracing）
+
+### 已否定路线
+- ❌ SDPA/flash_attn 切换：模型始终走 SDPA，无法评估
+- ❌ torch.compile：HF generate() 框架导致 dynamo 零 tracing
+- ❌ vLLM/TRT-LLM 原生集成：嵌套 generate 是致命架构障碍
+
+### 已验证路线
+- ✅ **CUDA Graph CP-only**：codegen RTF 0.89→0.45（1.97x），bit-exact，全 gates PASS
+- 🟡 CUDA Graph Talker：3.66x（两者都开），但不 bit-exact
+- 🟡 INT8/FP8 量化：单独 ~5%，与 CUDA Graph 组合可叠加 15-20%
+
+### 漂移问题
+- 漂移触发源 = conv/upsample 路径（GPU 调度非确定性）
+- 对精度不敏感（bf16/fp32 均漂移）
+- `process=0 + greedy + fixed seed` 可保证确定性
+- event/sync 同步可消除漂移但 TTFA 代价过高
+
+### 爆音问题
+- 爆音来自模型输出本身（codes），非 streaming 造成
+- 解码窗口/拼接策略对爆音位置有强影响

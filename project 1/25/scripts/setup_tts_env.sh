@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-export PYTHONPATH="/workspace/project 1/25/third_party/vllm-omni:${PYTHONPATH:-}"
+export PYTHONPATH="/workspace/vllm-omni:${PYTHONPATH:-}"
 
 pip install -U fastapi uvicorn soundfile librosa onnxruntime sox "huggingface_hub==0.36.0"
 
