@@ -327,12 +327,12 @@ def run_stream(stream_url: str, payload: dict, out_path: str, save_wav: bool = T
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sr)
-        for chunk in resp.iter_content(chunk_size=4096):
-            if not chunk:
-                continue
-            if first_chunk is None:
-                first_chunk = time.time()
-            pcm_chunks.append(chunk)
+            for chunk in resp.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                if first_chunk is None:
+                    first_chunk = time.time()
+                pcm_chunks.append(chunk)
             if wf is not None:
                 wf.writeframes(chunk)
     if wf is not None:

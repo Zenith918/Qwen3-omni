@@ -63,4 +63,24 @@ export TTS_DEEP_STREAM_PACKET_TRACE TTS_DEEP_STREAM_METRICS
 export TTS_CODE_DUMP_ENABLE TTS_CODE_DUMP_DIR
 
 echo "[run_tts_server] MODEL=$TTS_MODEL_DIR POLICY=$TTS_DEEP_STREAM_DETERMINISTIC_POLICY PACKETS=$TTS_DEEP_STREAM_PACKET_TOKENS LEFT=$TTS_DEEP_STREAM_LEFT_CONTEXT CP_GRAPH=$TTS_CODEGEN_CUDAGRAPH_CP DEC_GRAPH=$TTS_DECODER_CUDAGRAPH GP=$TTS_CODEGEN_GROUP_PARALLEL"
-python3 "/workspace/project 1/25/clients/tts_server.py"
+
+# D3: Auto-restart wrapper — CUDA device-side assert crashes are unrecoverable,
+# auto-restart ensures service availability under cancel/disconnect pressure.
+MAX_RESTARTS=${TTS_MAX_RESTARTS:-50}
+RESTART_COUNT=0
+RESTART_DELAY=3
+
+while true; do
+  echo "[run_tts_server] Starting TTS (restart #${RESTART_COUNT})..."
+  python3 "/workspace/project 1/25/clients/tts_server.py" || true
+  EXIT_CODE=$?
+  RESTART_COUNT=$((RESTART_COUNT + 1))
+
+  if [ "$RESTART_COUNT" -ge "$MAX_RESTARTS" ]; then
+    echo "[run_tts_server] Max restarts ($MAX_RESTARTS) reached, giving up."
+    exit 1
+  fi
+
+  echo "[run_tts_server] TTS exited (code=$EXIT_CODE), restarting in ${RESTART_DELAY}s... (restart #${RESTART_COUNT}/${MAX_RESTARTS})"
+  sleep "$RESTART_DELAY"
+done

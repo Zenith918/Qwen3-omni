@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qwen3 语音助手</title>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.9.1/dist/livekit-client.umd.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 {
+      font-size: 1.6em;
+      margin: 20px 0 10px;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle { color: #888; font-size: 0.85em; margin-bottom: 20px; }
+    .status {
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-size: 0.9em;
+      font-weight: 500;
+      margin-bottom: 15px;
+      transition: all 0.3s;
+    }
+    .status.disconnected { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+    .status.connecting { background: rgba(234,179,8,0.15); color: #eab308; border: 1px solid rgba(234,179,8,0.3); }
+    .status.connected { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
+    .status.error { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 10px 28px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1em;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+    #connectBtn {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: white;
+      box-shadow: 0 4px 15px rgba(99,102,241,0.3);
+    }
+    #connectBtn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
+    #connectBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #disconnectBtn {
+      background: rgba(239,68,68,0.15);
+      color: #ef4444;
+      border: 1px solid rgba(239,68,68,0.3);
+    }
+    #disconnectBtn:hover:not(:disabled) { background: rgba(239,68,68,0.25); }
+    #disconnectBtn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    .visualizer {
+      width: 200px;
+      height: 200px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(99,102,241,0.1) 0%, transparent 70%);
+      border: 2px solid rgba(99,102,241,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 15px 0;
+      transition: all 0.3s;
+    }
+    .visualizer.active {
+      border-color: rgba(99,102,241,0.6);
+      box-shadow: 0 0 40px rgba(99,102,241,0.2);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .visualizer.speaking {
+      border-color: rgba(34,197,94,0.6);
+      box-shadow: 0 0 40px rgba(34,197,94,0.2);
+      animation: pulse-green 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.03); }
+    }
+    @keyframes pulse-green {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    .visualizer-text {
+      font-size: 1.1em;
+      color: #888;
+    }
+
+    .log-container {
+      width: 100%;
+      max-width: 600px;
+      margin-top: 15px;
+    }
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .log-header h3 { font-size: 0.9em; color: #888; }
+    .log-header button {
+      padding: 4px 12px;
+      font-size: 0.75em;
+      background: rgba(255,255,255,0.05);
+      color: #888;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+    }
+    #log {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: 12px;
+      height: 200px;
+      overflow-y: auto;
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 0.8em;
+      line-height: 1.6;
+    }
+    .log-entry.info { color: #94a3b8; }
+    .log-entry.event { color: #6366f1; }
+    .log-entry.success { color: #22c55e; }
+    .log-entry.error { color: #ef4444; }
+    .log-entry.audio { color: #eab308; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Qwen3 语音助手</h1>
+  <p class="subtitle">WebRTC 实时语音通话 · Omni + TTS</p>
+
+  <div id="status" class="status disconnected">未连接</div>
+  <div id="stats" style="color:#6366f1; font-size:0.85em; margin:5px 0; font-family:monospace;"></div>
+
+  <div class="controls">
+    <button id="connectBtn" onclick="connect()">🔌 连接</button>
+    <button id="disconnectBtn" onclick="disconnect()" disabled>断开</button>
+  </div>
+
+  <div id="visualizer" class="visualizer">
+    <span class="visualizer-text">🎤 等待连接</span>
+  </div>
+
+  <div class="log-container">
+    <div class="log-header">
+      <h3>日志</h3>
+      <button onclick="document.getElementById('log').innerHTML=''">清空</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    let room = null;
+    let agentAudioEl = null;
+
+    // ── D5 浏览器端打点 ──────────────────────────────────
+    const browserTraces = [];
+    let currentTrace = null;
+    let audioContext = null;
+    let micAnalyser = null;
+    let speechDetected = false;
+    let speechEndTimer = null;
+    const SPEECH_THRESHOLD = 0.015;   // 能量阈值
+    const SILENCE_TIMEOUT_MS = 400;   // 静音判定
+
+    function startBrowserTrace() {
+      currentTrace = {
+        t_user_speech_start: null,
+        t_user_speech_end: null,
+        t_first_audio_playout: null,
+      };
+      speechDetected = false;
+    }
+
+    function monitorMic(stream) {
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      micAnalyser = audioContext.createAnalyser();
+      micAnalyser.fftSize = 512;
+      source.connect(micAnalyser);
+      const buf = new Float32Array(micAnalyser.fftSize);
+
+      function tick() {
+        if (!micAnalyser) return;
+        micAnalyser.getFloatTimeDomainData(buf);
+        let rms = 0;
+        for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+        rms = Math.sqrt(rms / buf.length);
+
+        if (rms > SPEECH_THRESHOLD) {
+          if (!speechDetected) {
+            speechDetected = true;
+            if (!currentTrace) startBrowserTrace();
+            if (!currentTrace.t_user_speech_start) {
+              currentTrace.t_user_speech_start = performance.now();
+            }
+          }
+          if (speechEndTimer) { clearTimeout(speechEndTimer); speechEndTimer = null; }
+        } else if (speechDetected) {
+          if (!speechEndTimer) {
+            speechEndTimer = setTimeout(() => {
+              if (currentTrace && !currentTrace.t_user_speech_end) {
+                currentTrace.t_user_speech_end = performance.now();
+                log(`📍 EoT: ${(currentTrace.t_user_speech_end - currentTrace.t_user_speech_start).toFixed(0)}ms speech`, 'event');
+              }
+              speechDetected = false;
+              speechEndTimer = null;
+            }, SILENCE_TIMEOUT_MS);
+          }
+        }
+        requestAnimationFrame(tick);
+      }
+      tick();
+    }
+
+    function onAgentAudioStart() {
+      if (currentTrace && !currentTrace.t_first_audio_playout) {
+        currentTrace.t_first_audio_playout = performance.now();
+        if (currentTrace.t_user_speech_end) {
+          const e2e = currentTrace.t_first_audio_playout - currentTrace.t_user_speech_end;
+          log(`⚡ EoT→FirstAudio: ${e2e.toFixed(0)}ms`, 'success');
+          browserTraces.push({...currentTrace, eot_to_first_audio_ms: Math.round(e2e)});
+          updateStats();
+        }
+        currentTrace = null;
+        startBrowserTrace();
+      }
+    }
+
+    function updateStats() {
+      const el = document.getElementById('stats');
+      if (!el || browserTraces.length === 0) return;
+      const vals = browserTraces.map(t => t.eot_to_first_audio_ms).filter(v => v > 0).sort((a,b) => a-b);
+      if (vals.length === 0) return;
+      const p50 = vals[Math.floor(vals.length * 0.5)];
+      const p95 = vals[Math.floor(vals.length * 0.95)];
+      el.textContent = `📊 EoT→Audio: P50=${p50}ms P95=${p95}ms (n=${vals.length})`;
+    }
+
+    function log(msg, type = 'info') {
+      const logEl = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(entry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text, cls) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.className = `status ${cls}`;
+    }
+
+    function setVisualizer(state) {
+      const el = document.getElementById('visualizer');
+      el.className = 'visualizer' + (state ? ' ' + state : '');
+      const textMap = {
+        '': '🎤 等待连接',
+        'active': '🎤 正在聆听...',
+        'speaking': '🔊 正在回复...',
+      };
+      el.querySelector('.visualizer-text').textContent = textMap[state || ''] || '🎤';
+    }
+
+    // ── 内嵌 Token (7天有效, 到期后在服务器上重新生成) ──
+    const EMBEDDED_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiVXNlciIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidm9pY2UtYWdlbnQtdGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9LCJzdWIiOiJ2b2ljZS11c2VyLTEiLCJpc3MiOiJBUEk3ZmozNXdHTHVtdGMiLCJuYmYiOjE3NzA5NDc3MzksImV4cCI6MTc3MTU1MjUzOX0.RhGZpVOEAEiVa4mP6A4-WQD4e6ybjK6w75oB-KePDG8';
+    const LIVEKIT_WS = 'wss://renshenghehuoren-mpdsjfwe.livekit.cloud';
+
+    async function getToken() {
+      // 1. URL 参数
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('lk_token')) {
+        log('使用 URL 参数中的 Token', 'info');
+        return { token: params.get('lk_token'), url: LIVEKIT_WS };
+      }
+
+      // 2. 尝试 Token API（如果 Token Server 可达）
+      for (const base of [window.location.origin, '']) {
+        try {
+          const resp = await fetch(`${base}/api/token`);
+          if (resp.ok) {
+            const data = await resp.json();
+            log(`Token API: room=${data.room}, TTL=${data.ttl}s`, 'success');
+            return { token: data.token, url: data.url };
+          }
+        } catch (e) { /* try next */ }
+      }
+
+      // 3. 内嵌 Token（最终 fallback，7天有效）
+      log('使用内嵌 Token (7天有效)', 'info');
+      return { token: EMBEDDED_TOKEN, url: LIVEKIT_WS };
+    }
+
+    async function connect() {
+      try {
+        const btn = document.getElementById('connectBtn');
+        btn.disabled = true;
+        setStatus('正在连接...', 'connecting');
+
+        const { token, url } = await getToken();
+        log(`连接到 ${url}`, 'event');
+
+        room = new LivekitClient.Room({
+          adaptiveStream: true,
+          dynacast: true,
+          audioCaptureDefaults: {
+            autoGainControl: true,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+
+        // 事件监听
+        room.on(LivekitClient.RoomEvent.Connected, () => {
+          log('✅ 已连接到房间', 'success');
+          setStatus('已连接', 'connected');
+          setVisualizer('active');
+          document.getElementById('disconnectBtn').disabled = false;
+        });
+
+        room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
+          log(`断开连接: ${reason || 'unknown'}`, 'event');
+          setStatus('已断开', 'disconnected');
+          setVisualizer('');
+          btn.disabled = false;
+          document.getElementById('disconnectBtn').disabled = true;
+        });
+
+        room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {
+          log(`参与者加入: ${p.identity}`, 'event');
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
+          log(`收到 ${participant.identity} 的 ${track.kind} track`, 'audio');
+          if (track.kind === 'audio') {
+            if (agentAudioEl) { agentAudioEl.remove(); }
+            agentAudioEl = track.attach();
+            agentAudioEl.style.display = 'none';
+            document.body.appendChild(agentAudioEl);
+            agentAudioEl.play().catch(e => log(`Audio play error: ${e}`, 'error'));
+            log('🔊 Agent 音频已连接', 'success');
+            setVisualizer('speaking');
+            // D5: 检测 Agent 音频开始播放
+            onAgentAudioStart();
+          }
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+          if (track.kind === 'audio') {
+            track.detach().forEach(el => el.remove());
+            setVisualizer('active');
+          }
+        });
+
+        // 连接
+        await room.connect(url, token);
+        log('正在发布麦克风...', 'info');
+        await room.localParticipant.setMicrophoneEnabled(true);
+        log('🎤 麦克风已开启', 'success');
+
+        // D5: 监控麦克风能量（浏览器端 EoT 检测）
+        try {
+          const micTrack = room.localParticipant.getTrackPublication(LivekitClient.Track.Source.Microphone);
+          if (micTrack && micTrack.track) {
+            const stream = new MediaStream([micTrack.track.mediaStreamTrack]);
+            monitorMic(stream);
+            log('📊 浏览器端延迟监控已启动', 'info');
+          }
+        } catch(e) { log(`Mic monitor: ${e.message}`, 'info'); }
+
+        // D5: 监听 ActiveSpeakers 触发首音检测
+        room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const agentSpeaking = speakers.some(s => s.identity !== 'voice-user-1');
+          setVisualizer(agentSpeaking ? 'speaking' : 'active');
+          if (agentSpeaking) onAgentAudioStart();
+        });
+
+        startBrowserTrace();
+
+      } catch (e) {
+        log(`连接失败: ${e.message}`, 'error');
+        setStatus('连接失败', 'error');
+        document.getElementById('connectBtn').disabled = false;
+      }
+    }
+
+    async function disconnect() {
+      if (room) {
+        await room.disconnect();
+        room = null;
+      }
+      if (agentAudioEl) {
+        agentAudioEl.remove();
+        agentAudioEl = null;
+      }
+      setStatus('已断开', 'disconnected');
+      setVisualizer('');
+      document.getElementById('connectBtn').disabled = false;
+      document.getElementById('disconnectBtn').disabled = true;
+      log('已断开连接', 'event');
+    }
+  </script>
+</body>
+</html>

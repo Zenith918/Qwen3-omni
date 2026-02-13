@@ -358,3 +358,88 @@ TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 待 bit-exact 修复
 ### 爆音问题
 - 爆音来自模型输出本身（codes），非 streaming 造成
 - 解码窗口/拼接策略对爆音位置有强影响
+
+---
+
+## Phase 6: 实时语音 Agent（D1–D5, 2026-02-09 ~ 02-13）
+
+从 TTS 引擎扩展为**完整实时语音通话系统**。
+
+### 6.1 D1–D2: 端到端管线建立 (02-09 ~ 02-10)
+
+| 交付物 | 说明 |
+|--------|------|
+| `clients/demo_audio_to_omni.py` | WAV → Omni → JSON（fast/slow/dual 模式 + streaming） |
+| `clients/demo_audio_to_tts.py` | E2E pipeline：Omni stream → Bridge → TTS |
+| Fast/Slow 双车道 | fast 只要 reply_text（43ms TTFT），slow 异步做 transcript+paralinguistic |
+| Bridge 分段策略 | 短文本保护 MIN_SEGMENT_CHARS=4, SHORT_TEXT_THRESHOLD=20 |
+
+**D2 指标**：
+- EoT→FirstAudio P50 ~270ms（Omni streaming TTFT ~43ms + TTS TTFA ~200ms）
+- TTS 回归 PASS（SNR 120dB bit-exact）
+
+### 6.2 D3: 稳定性 + VAD (02-11)
+
+| 交付物 | 说明 |
+|--------|------|
+| `runtime/duplex_controller.py` | 状态机（LISTENING/THINKING/SPEAKING/INTERRUPTING）+ 级联 cancel |
+| `runtime/vad_silero.py` | Silero VAD（CPU, 512 samples @16kHz） |
+| TTS Server 加固 | per-request cancel + `/tts/cancel` API + crash dump ring buffer + auto-restart |
+| `clients/tts_stress_test.py` | 200 轮压测 0 crash |
+
+**关键修复**：
+- TTS CUDA embedding assert crash → `tok.clamp(0, vocab_size-1)` + safe return on disconnect + `torch.cuda.synchronize()` at lock
+- Cancel→silence P95 = **7.5ms**
+
+### 6.3 D4: GPU 调度 + WebRTC 通话 (02-12)
+
+| 交付物 | 说明 |
+|--------|------|
+| `runtime/gpu_scheduler.py` | 硬优先级调度器：fast lane 抢占、slow lane try_acquire、barge-in 冷却 5s |
+| `runtime/livekit_agent.py` | **LiveKit Agent** — VAD→STT(Omni)→LLM(Omni)→TTS 全接入 WebRTC |
+| `runtime/webrtc_test.html` | 产品级前端 UI |
+| `runtime/token_server.py` | JWT Token 自动生成 API |
+| `scripts/start_all.sh` | 一键启动/重启/状态管理 |
+| `/post_start.sh` | Pod 重启自动恢复所有服务 |
+
+**WebRTC 通话全链路**：
+```
+浏览器 🎤 →WebRTC→ LiveKit Cloud → Agent(Silero VAD → OmniSTT → OmniLLM → QwenTTS) → WebRTC → 浏览器 🔊
+```
+
+**D4 调试历程（v1→v11）**：修复了 JobContext API 变更、AgentSession 参数、LLMStream/ChunkedStream 签名、AudioEmitter 生命周期、缺失 STT、同步阻塞事件循环等 11 个 LiveKit v1.4 兼容问题。
+
+**实测**：30 次 STT 转写、24 次 LLM 回复、18 次 TTS 合成、**0 Error**。
+
+### 6.4 D5: 端到端可观测 + 延迟优化 (02-13)
+
+| 交付物 | 说明 |
+|--------|------|
+| TraceCollector | 9 个时间戳打点，输出 `output/day5_e2e_traces.jsonl` |
+| 浏览器端打点 | WebAudio 能量检测 EoT + 首音检测 + P50/P95 统计面板 |
+| VAD hangover A/B | 550ms → 200ms（env: `VAD_SILENCE_MS`） |
+| TTS 帧粒度 | 一次大块 → 20ms 小帧逐帧 push |
+| Continuation 机制 | LLM 先短后长 prompt + `ENABLE_CONTINUATION` 开关 |
+| AudioEmitter 修复 | 始终先 initialize 避免 StreamAdapter 崩溃 |
+
+**D5 延迟分段（22 轮实测）**：
+
+| 延迟段 | P50 | P95 | 说明 |
+|--------|-----|-----|------|
+| vad→stt | 104ms | 185ms | ✅ 快 |
+| llm→tts_first | 322ms | 14.6s | TTS TTFA（排队时高） |
+| **tts_first→publish** | **1481ms** | 4418ms | 🔴 **最大瓶颈** |
+
+**瓶颈锁定**：TTS 在线程里同步收完全部 PCM 才开始推帧。应改为边收边推。
+
+### 6.5 关键技术决策
+
+| 决策 | 原因 |
+|------|------|
+| Talker CUDA Graph 不启用 | full-buffer attention 浮点不 bit-exact |
+| GROUP_PARALLEL=0 | auto 会毁音质 |
+| Fast/Slow 双车道 | fast 只要 reply_text(43ms)，slow 异步 |
+| Slow lane 非阻塞 | try_acquire 失败直接跳过，barge-in 冷却 5s |
+| TTS 断连安全返回 | 不 raise + CUDA sync at lock + output clamp |
+| LiveKit Agent v1.4 | 需 ctx.connect() + wait_for_participant()，AgentSession.start(agent, room=) |
+| AudioEmitter 必须先 initialize | 即使无音频也推静音帧，避免 StreamAdapter 崩溃 |

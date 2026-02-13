@@ -403,30 +403,33 @@ class CPGraphAccelerator:
         return r
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _sample(logits, do_sample, top_k, top_p, temperature, generator):
+    def _sample(self, logits, do_sample, top_k, top_p, temperature, generator):
+        vocab_size = logits.size(-1)
         if not do_sample:
-            return torch.argmax(logits, dim=-1)
-        if temperature is not None and temperature > 0:
+            tok = torch.argmax(logits, dim=-1)
+        elif temperature is not None and temperature > 0:
             logits = logits / temperature
-        if top_k is not None and top_k > 0:
-            tk = min(top_k, logits.size(-1))
-            topk_vals, topk_idx = torch.topk(logits, k=tk, dim=-1)
-            probs = torch.softmax(topk_vals, dim=-1)
-            nxt = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
-            return topk_idx.gather(-1, nxt.unsqueeze(-1)).squeeze(-1)
-        if top_p is not None and top_p < 1.0:
-            sl, si = torch.sort(logits, descending=True)
-            probs = torch.softmax(sl, dim=-1)
-            cum = torch.cumsum(probs, dim=-1)
-            mask = cum > top_p
-            mask[..., 0] = False
-            sl = sl.masked_fill(mask, -float("inf"))
-            probs = torch.softmax(sl, dim=-1)
-            nxt = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
-            return si.gather(-1, nxt.unsqueeze(-1)).squeeze(-1)
-        probs = torch.softmax(logits, dim=-1)
-        return torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+            if top_k is not None and top_k > 0:
+                tk = min(top_k, logits.size(-1))
+                topk_vals, topk_idx = torch.topk(logits, k=tk, dim=-1)
+                probs = torch.softmax(topk_vals, dim=-1)
+                nxt = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+                tok = topk_idx.gather(-1, nxt.unsqueeze(-1)).squeeze(-1)
+            elif top_p is not None and top_p < 1.0:
+                sl, si = torch.sort(logits, descending=True)
+                cp = torch.softmax(sl, dim=-1).cumsum(-1)
+                mask = cp - torch.softmax(sl, dim=-1) >= top_p
+                sl[mask] = -float("inf")
+                probs = torch.softmax(sl, dim=-1)
+                nxt = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+                tok = si.gather(-1, nxt.unsqueeze(-1)).squeeze(-1)
+            else:
+                probs = torch.softmax(logits, dim=-1)
+                tok = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+        else:
+            tok = torch.argmax(logits, dim=-1)
+        # D3: Clamp to valid vocab range to prevent CUDA device-side assert on embedding lookup
+        return tok.clamp(0, vocab_size - 1)
 
 
 # ======================================================================

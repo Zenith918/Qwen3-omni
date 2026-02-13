@@ -82,8 +82,9 @@ export PYTHONPATH="/workspace/vllm-omni"
 /workspace/vllm-omni
 ```
 
-> ⚠️ 不要同时启动 LLM + TTS server，显存碎片会导致 OOM。启动前先 `nvidia-smi` 确认空闲。
-> LLM 峰值占用约 32.9 GiB，TTS 约 12 GiB。
+> LLM（gpu_memory_utilization=0.6）占用 ≤ 27 GiB，TTS 0.6B 实测占用 ~3.4 GiB。
+> 合计 ~30.4 GiB，L40S (45 GiB) 可单卡共存，余量 ~14.6 GiB。
+> 注意：如果调高 LLM 的 `gpu_memory_utilization`（如 0.9），则可能挤压 TTS 导致 OOM。
 
 ---
 
@@ -112,7 +113,7 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen3-Omni-AWQ-4bit","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-LLM 性能参考（L40S）：TTFT 0.078s, 171 tokens/s, VRAM ~33 GiB。
+LLM 性能参考（L40S）：TTFT 0.078s, 171 tokens/s, VRAM ≤ 27 GiB (util=0.6)。
 
 ### 3.2 Bridge Demo（LLM → TTS 桥接）
 
@@ -481,16 +482,30 @@ export TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 保持关闭
 | `clients/tts_cached_decode_poc.py` | 缓存解码 PoC（参考用） |
 | `clients/llm_smoke_test.py` | LLM 烟测 |
 
+### Voice Agent 运行时 (D1–D5 新增)
+
+| 文件 | 说明 |
+|---|---|
+| `runtime/livekit_agent.py` | **LiveKit Voice Agent** — VAD→STT(Omni)→LLM(Omni)→TTS, 含 TraceCollector 9点打点 |
+| `runtime/token_server.py` | JWT Token API (:3000) + 前端静态文件托管 |
+| `runtime/webrtc_test.html` | WebRTC 前端 UI（浏览器端 EoT 检测 + P50/P95 统计） |
+| `runtime/duplex_controller.py` | 双工状态机（LISTENING/THINKING/SPEAKING/INTERRUPTING）+ 级联 cancel |
+| `runtime/gpu_scheduler.py` | GPU 硬优先级调度器（fast lane 抢占, slow lane try_acquire） |
+| `runtime/vad_silero.py` | Silero VAD 封装（CPU, 512 samples @16kHz） |
+| `runtime/live_duplex.py` | 模拟 live 对话会话（用 WAV 文件模拟麦克风） |
+
 ### 脚本
 
 | 文件 | 说明 |
 |---|---|
-| `scripts/run_tts_server.sh` | 启动 TTS 服务（内置黄金配置 + CUDA Graph） |
+| `scripts/run_tts_server.sh` | 启动 TTS 服务（黄金配置 + CUDA Graph + auto-restart） |
 | `scripts/run_ci_regression.sh` | 运行 CI 回归（`--mode fast/full`） |
 | `scripts/run_llm_server.sh` | 启动 LLM 服务（vLLM OpenAI API） |
-| `scripts/run_demo_bridge.sh` | LLM→TTS 桥接 Demo |
-| `scripts/setup_tts_env.sh` | TTS 环境初始化（依赖安装 + 模型下载） |
-| `scripts/setup_llm_env.sh` | LLM 环境初始化（vLLM 安装） |
+| `scripts/start_all.sh` | **一键管理** `{start\|restart\|stop\|status}` 所有服务 |
+| `scripts/supervisor_voice_agent.conf` | Supervisor 进程管理配置（备用） |
+| `scripts/setup_tts_env.sh` | TTS 环境初始化 |
+| `scripts/setup_llm_env.sh` | LLM 环境初始化 |
+| `/post_start.sh` | RunPod Pod 重启后自动恢复所有服务 |
 
 ### 配置
 
@@ -505,8 +520,55 @@ export TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 保持关闭
 | 目录 | 说明 |
 |---|---|
 | `output/regression/20260208_200725/` | **当前黄金基线**（CP+Decoder Graph, 全 PASS） |
-| `output/regression/20260207_192126/` | 历史黄金基线（无 Graph） |
 | `output/regression/latest/` | 最新回归的符号链接 |
-| `output/p1_benchmark/` | P1 三路分解基准数据 |
-| `output/p2_cudagraph/` | P2 CUDA Graph 可行性验证数据 |
-| `output/p3_codegen_benchmark/` | P3 codegen 端到端基准数据 |
+| `output/day5_e2e_traces.jsonl` | D5 端到端延迟 trace（22 轮） |
+| `output/day3_stress_cancel_report.json` | D3 压测报告（200轮, cancel P95=7.5ms） |
+| `output/day3_vad_eval.json` | D3 VAD 评估结果 |
+
+### Voice Agent 环境变量速查
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `VAD_SILENCE_MS` | 200 | VAD hangover（静音判定），越小越灵敏 |
+| `TTS_FRAME_MS` | 20 | TTS 发布帧粒度 ms |
+| `MIN_ENDPOINTING` | 0.3 | LiveKit 最小 endpointing delay |
+| `ENABLE_CONTINUATION` | 1 | LLM 延续句机制（先短后长） |
+| `LLM_MAX_TOKENS` | 150 | LLM 最大 token 数 |
+| `LLM_TEMPERATURE` | 0.3 | LLM 温度 |
+| `LIVEKIT_URL` | wss://...livekit.cloud | LiveKit Cloud 地址 |
+| `LIVEKIT_API_KEY` | — | LiveKit API Key |
+| `LIVEKIT_API_SECRET` | — | LiveKit API Secret |
+
+### Voice Agent 快速启动
+
+```bash
+# 1. 确保 LLM + TTS 已运行
+bash scripts/start_all.sh status
+
+# 2. 启动全部服务（含 Agent + Token Server）
+bash scripts/start_all.sh start
+
+# 3. 浏览器访问（通过 Jupyter proxy）
+# https://POD_ID-8888.proxy.runpod.net/proxy/3000/?token=JUPYTER_TOKEN
+
+# 4. 查看延迟 trace
+cat output/day5_e2e_traces.jsonl | python3 -m json.tool
+
+# 5. 重启 Agent（改代码后）
+bash scripts/start_all.sh restart
+```
+
+### LiveKit Agent 踩坑经验（v1.4 API）
+
+| 坑 | 解决方案 |
+|---|---|
+| `JobContext` 没有 `participant` 属性 | 用 `ctx.connect()` + `ctx.wait_for_participant()` |
+| `AgentSession.start()` 不接受 `participant` | 只传 `agent` 和 `room` |
+| `LLMStream.__init__()` 缺参数 | 必须传 `tools=[]` 和 `conn_options` |
+| `ChatChunk` 缺 `id` 字段 | 必须传 `id="omni"` |
+| `ChunkedStream._run()` 签名变化 | 必须接受 `output_emitter` 参数 |
+| `AudioEmitter isn't started` | **必须在 `_run()` 开头就调 `initialize()`**，即使没音频也推静音帧 |
+| `start_segment()` 仅限 stream=True | 非流式 ChunkedStream 不用 segment 管理 |
+| Omni audio 格式 | 用 `{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,..."}}`，不是 `input_audio` |
+| 同步 HTTP 阻塞事件循环 | 所有 requests.post 必须 `run_in_executor()` |
+| 音频编码阻塞主线程 | base64 编码也要 offload 到线程 |

@@ -1263,6 +1263,121 @@ class TTSRequest(BaseModel):
     max_new_tokens: int = 2048
     non_streaming_mode: bool = False
     seed: Optional[int] = None
+    request_id: Optional[str] = None  # D3: per-request cancel support
+
+
+# ── D3: 服务端 per-request cancel registry ────────────────────
+_cancel_registry: dict[str, Event] = {}
+_cancel_registry_lock = Lock()
+MIN_TEXT_CHARS = 2  # 服务端输入防御：拒绝过短文本
+
+
+# ── D4 P0-3: Request Ring Buffer + Crash Dump ─────────────────
+RING_BUFFER_SIZE = 50
+_request_ring: deque = deque(maxlen=RING_BUFFER_SIZE)
+_defense_stats = {
+    "clamp_count": 0,         # codegen output 被 clamp 的次数
+    "short_text_rejected": 0, # 短文本被过滤次数
+    "cancel_during_codegen": 0,
+    "cancel_during_decode": 0,
+    "cancel_during_glue": 0,
+    "disconnect_count": 0,
+    "error_count": 0,
+}
+_defense_stats_lock = Lock()
+
+
+def _ring_record(request_id: str, text: str, **extra):
+    """记录请求到 ring buffer"""
+    entry = {
+        "request_id": request_id,
+        "text_len": len(text),
+        "text_preview": text[:30],
+        "t_epoch": time.time(),
+        **extra,
+    }
+    _request_ring.append(entry)
+
+
+def _defense_inc(key: str, count: int = 1):
+    with _defense_stats_lock:
+        _defense_stats[key] = _defense_stats.get(key, 0) + count
+
+
+def _dump_crash_evidence(reason: str):
+    """导出 crash 前的 ring buffer 和防御统计"""
+    import os as _os
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    dump_dir = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+        "output", "crash_dumps", ts)
+    _os.makedirs(dump_dir, exist_ok=True)
+
+    # Ring buffer
+    ring_path = _os.path.join(dump_dir, "ring_buffer.json")
+    with open(ring_path, "w") as f:
+        json.dump(list(_request_ring), f, indent=2, default=str)
+
+    # Defense stats
+    stats_path = _os.path.join(dump_dir, "defense_stats.json")
+    with open(stats_path, "w") as f:
+        json.dump(_defense_stats, f, indent=2)
+
+    # Reason
+    reason_path = _os.path.join(dump_dir, "crash_reason.txt")
+    with open(reason_path, "w") as f:
+        f.write(f"Crash at {ts}\nReason: {reason}\n")
+
+    # Repro case: last 5 requests
+    repro_path = _os.path.join(dump_dir, "repro_case.json")
+    last_5 = list(_request_ring)[-5:]
+    repro = {
+        "description": "Last 5 requests before crash. Replay with tts_stress_test.py or curl.",
+        "requests": [
+            {"text": r.get("text_preview", ""), "request_id": r.get("request_id", "")}
+            for r in last_5
+        ],
+    }
+    with open(repro_path, "w") as f:
+        json.dump(repro, f, indent=2, default=str)
+
+    print(f"[TTS] CRASH DUMP saved to {dump_dir}")
+    sys.stdout.flush()
+    return dump_dir
+
+
+def _register_cancel(request_id: str, event: Event):
+    with _cancel_registry_lock:
+        _cancel_registry[request_id] = event
+
+
+def _unregister_cancel(request_id: str):
+    with _cancel_registry_lock:
+        _cancel_registry.pop(request_id, None)
+
+
+def _cancel_request(request_id: str) -> bool:
+    with _cancel_registry_lock:
+        ev = _cancel_registry.get(request_id)
+        if ev:
+            ev.set()
+            return True
+    return False
+
+
+def _cancel_all_requests():
+    with _cancel_registry_lock:
+        for ev in _cancel_registry.values():
+            ev.set()
+
+
+def _safe_cuda_cleanup():
+    """安全清理 CUDA 状态，防止断连后 device-side assert"""
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
 
 
 @app.on_event("startup")
@@ -1522,6 +1637,48 @@ def _prime_starter_cache() -> None:
         sys.stdout.flush()
 
 
+# ── D3: Cancel API endpoints ──────────────────────────────────
+class CancelRequest(BaseModel):
+    request_id: Optional[str] = None
+
+
+@app.post("/tts/cancel")
+def cancel_tts(req: CancelRequest = CancelRequest()):
+    """取消指定请求或所有活跃请求"""
+    if req.request_id:
+        ok = _cancel_request(req.request_id)
+        return {"cancelled": ok, "request_id": req.request_id}
+    else:
+        _cancel_all_requests()
+        return {"cancelled": True, "scope": "all"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "gpu_available": torch.cuda.is_available()}
+
+
+@app.get("/webrtc")
+def webrtc_test_page():
+    """Serve WebRTC test page"""
+    import pathlib
+    html_path = pathlib.Path(__file__).parent.parent / "runtime" / "webrtc_test.html"
+    if html_path.exists():
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    return {"error": "webrtc_test.html not found"}
+
+
+@app.get("/tts/stats")
+def tts_stats():
+    """D4: 返回防御统计和最近请求摘要"""
+    return {
+        "defense_stats": dict(_defense_stats),
+        "ring_buffer_size": len(_request_ring),
+        "recent_requests": list(_request_ring)[-5:],
+    }
+
+
 @app.post("/synthesize")
 def synthesize(req: TTSRequest):
     start = time.time()
@@ -1557,8 +1714,23 @@ def synthesize(req: TTSRequest):
 
 @app.post("/tts/stream")
 def synthesize_stream(req: TTSRequest):
+    # ── D3: 输入防御 ──
+    clean_text = (req.text or "").strip()
+    if len(clean_text) < MIN_TEXT_CHARS:
+        _defense_inc("short_text_rejected")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"text too short (min {MIN_TEXT_CHARS} chars)", "text": clean_text},
+        )
+    req.text = clean_text
+
+    # ── D3: per-request cancel 注册 ──
+    request_id = req.request_id or f"{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
+    _ring_record(request_id, clean_text, speaker=req.speaker)
+
     if TTS_DEEP_STREAM_ENABLE:
-        return _synthesize_stream_deep(req)
+        return _synthesize_stream_deep(req, request_id=request_id)
     assert _omni is not None
     global _first_request_done
     t_req_in = time.time()
@@ -1609,6 +1781,8 @@ def synthesize_stream(req: TTSRequest):
                     yield chunk
 
             with _tts_lock:
+                # D3: sync CUDA before new request to clear any cancelled request's residual ops
+                _safe_cuda_cleanup()
                 t_after_lock = time.time()
                 for seg_idx, seg in enumerate(segments):
                     if cancel_event.is_set():
@@ -1661,10 +1835,20 @@ def synthesize_stream(req: TTSRequest):
                                     sys.stdout.flush()
                                 yield chunk
                             sent_samples = len(audio_np)
-        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError) as exc:
             cancel_event.set()
-            raise
+            _safe_cuda_cleanup()
+            print(f"[TTS] client_disconnect type={type(exc).__name__} t_req_in={t_req_in:.6f}")
+            sys.stdout.flush()
+            return  # D3: 安全返回，不 raise，避免 CUDA assert
+        except Exception as exc:
+            cancel_event.set()
+            _safe_cuda_cleanup()
+            print(f"[TTS] generate_error type={type(exc).__name__} msg={exc} t_req_in={t_req_in:.6f}")
+            sys.stdout.flush()
+            return
         finally:
+            _unregister_cancel(request_id)
             if cancel_event.is_set():
                 print(f"[TTS] request_cancelled=true t_req_in={t_req_in:.6f}")
                 sys.stdout.flush()
@@ -1678,6 +1862,7 @@ def synthesize_stream(req: TTSRequest):
         sys.stdout.flush()
         _first_request_done = True
 
+    _register_cancel(request_id, cancel_event)
     gen = _gen()
     first_chunk = b""
     try:
@@ -1692,6 +1877,7 @@ def synthesize_stream(req: TTSRequest):
         "X-Warm-Request": str(warm_request).lower(),
         "X-Segments": str(len(segments)),
         "X-Cache-Starter": str(cache_hit).lower(),
+        "X-Request-Id": request_id,
     }
     return StreamingResponse(_gen(), media_type="audio/pcm", headers=headers)
 
@@ -1748,9 +1934,18 @@ def _synthesize_stream_glue(req: TTSRequest):
                         first_out = time.time()
                     emitted_samples += len(chunk) // 2
                     yield chunk
-        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError) as exc:
             cancel_event.set()
-            raise
+            _safe_cuda_cleanup()
+            print(f"[TTS_GLUE] client_disconnect type={type(exc).__name__}")
+            sys.stdout.flush()
+            return  # D3: safe return
+        except Exception as exc:
+            cancel_event.set()
+            _safe_cuda_cleanup()
+            print(f"[TTS_GLUE] error type={type(exc).__name__} msg={exc}")
+            sys.stdout.flush()
+            return
         finally:
             cancel_event.set()
             try:
@@ -1806,10 +2001,12 @@ def _synthesize_stream_glue(req: TTSRequest):
     return StreamingResponse(_iter_full(), media_type="audio/pcm", headers=headers)
 
 
-def _synthesize_stream_deep(req: TTSRequest):
+def _synthesize_stream_deep(req: TTSRequest, request_id: str = ""):
     assert _deep_tokenizer is not None
     global _first_request_done
     request_tag = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    if not request_id:
+        request_id = request_tag
     t_req_in = time.time()
     first_out: Optional[float] = None
     sr = 24000
@@ -2151,6 +2348,8 @@ def _synthesize_stream_deep(req: TTSRequest):
                     yield chunk
 
             with _tts_lock:
+                # D3: sync CUDA before new request to clear any cancelled request's residual ops
+                _safe_cuda_cleanup()
                 t_after_lock = time.time()
                 for seg_idx, seg in enumerate(segments):
                     if _check_deadline():
@@ -2535,16 +2734,37 @@ def _synthesize_stream_deep(req: TTSRequest):
 
                     if cancel_event.is_set():
                         break
-        except (GeneratorExit, BrokenPipeError, ConnectionResetError):
+        except (GeneratorExit, BrokenPipeError, ConnectionResetError) as exc:
             cancel_event.set()
             if phase_sync is not None:
                 phase_sync.mark_done()
-            raise
+            _safe_cuda_cleanup()
+            print(f"[TTS_DEEP] client_disconnect type={type(exc).__name__} "
+                  f"request_id={request_id} t_req_in={t_req_in:.6f}")
+            sys.stdout.flush()
+            return  # D3: 安全返回，不 raise
+        except Exception as exc:
+            cancel_event.set()
+            if phase_sync is not None:
+                phase_sync.mark_done()
+            _safe_cuda_cleanup()
+            _defense_inc("error_count")
+            # D4: Crash dump on CUDA/generation errors
+            error_type = type(exc).__name__
+            if "CUDA" in str(exc) or "Accelerator" in error_type:
+                _dump_crash_evidence(f"CUDA error: {exc}")
+            print(f"[TTS_DEEP] generate_error type={error_type} "
+                  f"msg={exc} request_id={request_id} t_req_in={t_req_in:.6f}")
+            sys.stdout.flush()
+            return
         finally:
+            _unregister_cancel(request_id)
             if phase_sync is not None:
                 phase_sync.mark_done()
             if cancel_event.is_set():
-                print(f"[TTS] request_cancelled=true t_req_in={t_req_in:.6f}")
+                _defense_inc("disconnect_count")
+                print(f"[TTS_DEEP] request_cancelled=true request_id={request_id} "
+                      f"t_req_in={t_req_in:.6f}")
                 sys.stdout.flush()
 
         t_done = time.time()
@@ -2692,6 +2912,7 @@ def _synthesize_stream_deep(req: TTSRequest):
         except Exception:
             left_ctx_header = 25
 
+    _register_cancel(request_id, cancel_event)
     gen = _gen()
     first_chunk = b""
     try:
@@ -2726,6 +2947,7 @@ def _synthesize_stream_deep(req: TTSRequest):
         "X-Model-TTF-MS": f"{metrics['model_ttf_ms']:.3f}",
         "X-Server-TTFA-MS": f"{metrics['server_ttfa_ms']:.3f}",
         "X-Code-Dump-Tag": request_tag,
+        "X-Request-Id": request_id,
     }
     def _gen_with_first() -> Generator[bytes, None, None]:
         if first_chunk:
