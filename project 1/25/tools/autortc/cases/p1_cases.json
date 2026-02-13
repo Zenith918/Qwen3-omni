@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "case_id": "boom_trigger",
+      "wav": "/workspace/project 1/25/output/autortc_cases/boom_trigger.wav"
+    },
+    {
+      "case_id": "speed_drift",
+      "wav": "/workspace/project 1/25/output/autortc_cases/speed_drift.wav"
+    },
+    {
+      "case_id": "distortion_sibilant",
+      "wav": "/workspace/project 1/25/output/autortc_cases/distortion_sibilant.wav"
+    },
+    {
+      "case_id": "stutter_long_pause",
+      "wav": "/workspace/project 1/25/output/autortc_cases/stutter_long_pause.wav"
+    }
+  ]
+}

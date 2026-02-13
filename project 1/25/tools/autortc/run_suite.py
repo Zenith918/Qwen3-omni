@@ -52,7 +52,10 @@ def _build_cases_from_json(path: str) -> list[tuple[str, str]]:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="AutoRTC run_suite: orchestrate probe_bot + user_bot.")
+    p = argparse.ArgumentParser(description="AutoRTC run_suite: three-ring regression.")
+    p.add_argument("--mode", default="fast", choices=["fast", "nightly"],
+                   help="fast=独立room/case, nightly=同room多轮")
+    p.add_argument("--ring0", type=int, default=1, help="1=run TTS core regression (Ring0)")
     p.add_argument("--room", default="voice-agent-test", help="target room")
     p.add_argument("--token_api", default="http://127.0.0.1:3000/api/token", help="token server api")
     p.add_argument("--run_id", default="", help="optional run id")
@@ -256,10 +259,28 @@ def main() -> int:
             run_dir,
         ]
         subprocess.run(metrics_cmd, check=False)
+
+    # ── D7 Ring0: TTS Core Regression ────────────────────────
+    ring0_pass = True
+    if args.ring0 == 1:
+        print("[Ring0] Running TTS core regression...")
+        ring0_script = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "run_ci_regression.sh")
+        if os.path.exists(ring0_script):
+            rc = subprocess.run(["bash", ring0_script, "--mode", "fast"], capture_output=True, text=True)
+            ring0_pass = rc.returncode == 0
+            ring0_status = "PASS" if ring0_pass else "FAIL"
+            print(f"[Ring0] TTS regression: {ring0_status}")
+            # 写入 summary
+            summary["ring0_tts_regression"] = ring0_status
+            write_json(summary_path, summary)
+        else:
+            print(f"[Ring0] Script not found: {ring0_script}")
+
     print(f"run_id={run_id}")
     print(f"summary={summary_path}")
     print(f"traces={traces_path}")
-    return 0 if summary["ok_cases"] == summary["total_cases"] else 2
+    all_ok = summary["ok_cases"] == summary["total_cases"] and ring0_pass
+    return 0 if all_ok else 2
 
 
 if __name__ == "__main__":

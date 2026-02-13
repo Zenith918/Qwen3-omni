@@ -11,6 +11,59 @@ import numpy as np
 from common import load_wav_mono_int16
 
 
+def _log_mel_distance(wav_a: str, wav_b: str, sr: int = 24000, n_mels: int = 40) -> float:
+    """计算两个 wav 之间的 log-mel spectrogram 距离（失真指标）"""
+    try:
+        sa, sra = load_wav_mono_int16(wav_a)
+        sb, srb = load_wav_mono_int16(wav_b)
+        if len(sa) == 0 or len(sb) == 0:
+            return -1.0
+        xa = sa.astype(np.float32) / 32768.0
+        xb = sb.astype(np.float32) / 32768.0
+        # 截取到相同长度
+        min_len = min(len(xa), len(xb))
+        xa, xb = xa[:min_len], xb[:min_len]
+
+        # 简易 mel spectrogram（不依赖 librosa）
+        def _mel_spec(x, sr_val, n_fft=1024, hop=512):
+            # STFT
+            n_frames = (len(x) - n_fft) // hop + 1
+            if n_frames <= 0:
+                return np.zeros((n_mels, 1))
+            frames = np.lib.stride_tricks.as_strided(
+                x, shape=(n_frames, n_fft),
+                strides=(x.strides[0] * hop, x.strides[0]))
+            window = np.hanning(n_fft)
+            spec = np.abs(np.fft.rfft(frames * window, axis=1)) ** 2
+            # Mel filterbank
+            fmin, fmax = 0.0, sr_val / 2.0
+            mel_min = 2595.0 * np.log10(1.0 + fmin / 700.0)
+            mel_max = 2595.0 * np.log10(1.0 + fmax / 700.0)
+            mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
+            hz_pts = 700.0 * (10.0 ** (mel_pts / 2595.0) - 1.0)
+            bins = np.floor((n_fft + 1) * hz_pts / sr_val).astype(int)
+            fb = np.zeros((n_mels, n_fft // 2 + 1))
+            for m in range(n_mels):
+                for k in range(bins[m], bins[m + 1]):
+                    if bins[m + 1] > bins[m]:
+                        fb[m, k] = (k - bins[m]) / (bins[m + 1] - bins[m])
+                for k in range(bins[m + 1], bins[m + 2]):
+                    if bins[m + 2] > bins[m + 1]:
+                        fb[m, k] = (bins[m + 2] - k) / (bins[m + 2] - bins[m + 1])
+            mel = np.dot(spec, fb.T).T  # (n_mels, n_frames)
+            return np.log(mel + 1e-10)
+
+        ma = _mel_spec(xa, sra or sr)
+        mb = _mel_spec(xb, srb or sr)
+        min_f = min(ma.shape[1], mb.shape[1])
+        if min_f == 0:
+            return -1.0
+        dist = float(np.mean((ma[:, :min_f] - mb[:, :min_f]) ** 2) ** 0.5)
+        return round(dist, 4)
+    except Exception:
+        return -1.0
+
+
 def _read_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -166,6 +219,12 @@ def main() -> int:
         tts_pub = latency_ms.get("tts_first_to_publish")
         llm_first = latency_ms.get("stt_done_to_llm_first")
 
+        # D7: Ring1 pre_rtc vs Ring2 post_rtc 失真
+        case_id = case.get("case_id", "")
+        run_dir_path = Path(args.output_dir)
+        pre_rtc_wav = str(run_dir_path / case_id / "pre_rtc.wav")
+        mel_dist = _log_mel_distance(pre_rtc_wav, wav) if os.path.exists(pre_rtc_wav) and wav and os.path.exists(wav) else -1.0
+
         if eot_fa is not None:
             eot_first_audio.append(eot_fa)
         if tts_pub is not None:
@@ -191,6 +250,9 @@ def main() -> int:
             "max_dropout_ms": round(max_dropout_ms, 1),
             "clipping_ratio": aq["clipping_ratio"],
             "rms": aq["rms"],
+            "mel_distance": mel_dist,
+            "micro_gap_count": aq.get("micro_gap_count", 0),
+            "audible_dropout_count": aq.get("audible_dropout_count", 0),
             "duration_s": round(aq["duration_s"], 3),
             "probe_wav": wav or "",
         })
