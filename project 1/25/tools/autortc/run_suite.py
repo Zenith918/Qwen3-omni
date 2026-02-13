@@ -164,11 +164,11 @@ def main() -> int:
         ]
 
         t_case_start = time.time()
-        # probe 先加入（确保能订阅到 Agent 的 audio track）
-        p_probe = subprocess.Popen(probe_cmd)
-        time.sleep(args.probe_after_user_s)
-        # user 后加入（触发 Agent JOB）
+        # D7: user 先加入（触发 Agent JOB，Agent 会 wait_for_participant 拿到 user）
+        # probe 紧跟加入（订阅 Agent audio track）
         p_user = subprocess.Popen(user_cmd)
+        time.sleep(1.0)  # 让 user 先连上
+        p_probe = subprocess.Popen(probe_cmd)
 
         user_rc = p_user.wait(timeout=max(30, int(rec_s) + 10))
         probe_rc = p_probe.wait(timeout=max(45, int(rec_s) + 15))

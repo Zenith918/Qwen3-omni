@@ -109,6 +109,8 @@ async def run_user_bot(args: argparse.Namespace) -> None:
             },
         )
 
+    # D7: 发完后多等，让 Agent 有时间 STT→LLM→TTS→publish→完成
+    await asyncio.sleep(15.0)
     await room.disconnect()
 
 

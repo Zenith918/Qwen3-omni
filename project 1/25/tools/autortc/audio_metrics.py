@@ -54,14 +54,49 @@ def _audio_quality_metrics(wav_path: str) -> dict:
     # 忽略头尾静音，避免固定录制窗口导致 dropout 误报
     voiced_idx = np.where(np.abs(x) >= 0.01)[0]
     if len(voiced_idx) > 0:
-        x = x[int(voiced_idx[0]): int(voiced_idx[-1]) + 1]
-    abs_x = np.abs(x)
+        x_voiced = x[int(voiced_idx[0]): int(voiced_idx[-1]) + 1]
+    else:
+        x_voiced = x
+    abs_x = np.abs(x_voiced)
 
     clipping_ratio = float(np.mean(abs_x > 0.99))
-    rms = float(math.sqrt(float(np.mean(x * x)))) if len(x) > 0 else 0.0
+    rms = float(math.sqrt(float(np.mean(x_voiced * x_voiced)))) if len(x_voiced) > 0 else 0.0
+
+    # ── D7 P0-2: 两层 dropout 检测 ──────────────────────────
+    # 用 20ms 窗口滑动计算能量，检测 gap
+    frame_ms = 20
+    frame_samples = int(sr * frame_ms / 1000)
+    energy_threshold = 0.005  # 低于此为"静音帧"
+    gap_frames = []  # 连续静音帧数
+    current_gap = 0
+    for i in range(0, len(x_voiced) - frame_samples, frame_samples):
+        frame = x_voiced[i:i + frame_samples]
+        frame_rms = float(np.sqrt(np.mean(frame * frame)))
+        if frame_rms < energy_threshold:
+            current_gap += 1
+        else:
+            if current_gap > 0:
+                gap_frames.append(current_gap)
+            current_gap = 0
+    if current_gap > 0:
+        gap_frames.append(current_gap)
+
+    gap_ms_list = [g * frame_ms for g in gap_frames]
+    micro_gaps = [g for g in gap_ms_list if 40 <= g < 200]
+    audible_gaps = [g for g in gap_ms_list if g >= 200]
+    # 也算 120ms+ 连续出现 >=2 次
+    mid_gaps = [g for g in gap_ms_list if 120 <= g < 200]
+    if len(mid_gaps) >= 2:
+        audible_gaps.extend(mid_gaps)
+
+    max_gap_ms = max(gap_ms_list) if gap_ms_list else 0.0
+
     return {
-        "dropout_count": 0,
-        "max_dropout_ms": 0.0,
+        "micro_gap_count": len(micro_gaps),
+        "audible_dropout_count": len(audible_gaps),
+        "max_gap_ms": max_gap_ms,
+        "dropout_count": len(micro_gaps) + len(audible_gaps),  # 兼容旧字段
+        "max_dropout_ms": max_gap_ms,
         "clipping_ratio": clipping_ratio,
         "rms": rms,
         "duration_s": float(len(samples)) / float(sr),
@@ -174,12 +209,23 @@ def main() -> int:
             writer.writerow(row)
 
     fast_lane_non_negative = all(v >= 0 for v in fast_lane_ttft) if fast_lane_ttft else False
-    # F2: 新增 rms gate 防止静音数据假 PASS
     min_rms = min(rms_values) if rms_values else 0.0
+
+    # D7 P0-2: 合理化 dropout — 收集 audible_dropout 而非所有 gap
+    total_audible_dropouts = sum(row.get("audible_dropout_count", 0) for row in
+        [_audio_quality_metrics(c.get("probe_wav", "")) for c in summary.get("cases", [])
+         if c.get("probe_wav") and os.path.exists(c.get("probe_wav", ""))]
+    ) if metrics_rows else 0
+    max_gap_all = max((row.get("max_gap_ms", 0) for row in
+        [_audio_quality_metrics(c.get("probe_wav", "")) for c in summary.get("cases", [])
+         if c.get("probe_wav") and os.path.exists(c.get("probe_wav", ""))]
+    ), default=0)
+
     gates = {
         "EoT->FirstAudio P95 <= 650ms": (_pct(eot_first_audio, 95) or float("inf")) <= 650.0,
         "tts_first->publish P95 <= 120ms": (_pct(tts_first_publish, 95) or float("inf")) <= 120.0,
-        "dropout_count == 0": sum(dropout_counts) == 0,
+        "audible_dropout_count == 0": total_audible_dropouts == 0,
+        "max_gap_ms < 200ms": max_gap_all < 200,
         "clipping_ratio < 0.1%": (max(clipping_ratios) if clipping_ratios else 1.0) < 0.001,
         "fast lane TTFT P95 <= 80ms": fast_lane_non_negative and ((_pct(fast_lane_ttft, 95) or float("inf")) <= 80.0),
         "all cases have audio (min_rms >= 0.01)": min_rms >= 0.01,

@@ -66,6 +66,10 @@ ENABLE_CONTINUATION = os.environ.get("ENABLE_CONTINUATION", "1") == "1"
 TRACE_DIR = os.environ.get("TRACE_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output"))
 
+# D7: Ring1 Pre-RTC 录音开关
+CAPTURE_PRE_RTC = os.environ.get("CAPTURE_PRE_RTC", "1") == "1"
+PRE_RTC_DIR = os.environ.get("PRE_RTC_DIR", "")
+
 # ══════════════════════════════════════════════════════════════
 # Trace 收集器（F5: 同时支持 AutoRTC 和手动连接）
 # ══════════════════════════════════════════════════════════════
@@ -179,14 +183,29 @@ class OmniSTT(stt.STT):
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False),
         )
         self._current_trace_id = None
+        self._llm_ref = None  # D7: LLM 引用，用于在 STT 开始时 propagate trace_id
+        self._tts_ref = None  # D7: TTS 引用
 
     def set_trace_id(self, tid):
         self._current_trace_id = tid
 
+    def set_siblings(self, llm_instance, tts_instance):
+        """D7: 让 STT 能在 recognize 开始时就 propagate trace_id 到 LLM/TTS"""
+        self._llm_ref = llm_instance
+        self._tts_ref = tts_instance
+
     async def _recognize_impl(self, buffer, *, language="zh", conn_options=None):
+        # D7: 在 STT 开始时就创建/确认 trace，立刻 propagate 给 LLM/TTS
         tid = self._current_trace_id
-        if tid:
-            _tracer.mark(tid, "t_agent_vad_end")
+        if not tid:
+            tid = _tracer.new_trace()
+            self._current_trace_id = tid
+        _tracer.mark(tid, "t_agent_vad_end")
+        # 立刻让 LLM 和 TTS 用同一个 trace_id（在 LLM 开始前！）
+        if self._llm_ref:
+            self._llm_ref.set_trace_id(tid)
+        if self._tts_ref:
+            self._tts_ref.set_trace_id(tid)
 
         frames = buffer if isinstance(buffer, list) else [buffer]
         wav_b64, duration = await asyncio.get_event_loop().run_in_executor(
@@ -407,6 +426,7 @@ class QwenTTSStream(tts.ChunkedStream):
         logger.info(f"[TTS] Synth: '{text[:40]}'")
 
         stop_event = threading.Event()
+        pre_rtc_chunks = []  # D7 Ring1: 收集 push 的帧用于落盘
         try:
             frame_bytes = int(SAMPLE_RATE_TTS * TTS_FRAME_MS / 1000) * 2
             loop = asyncio.get_running_loop()
@@ -423,7 +443,6 @@ class QwenTTSStream(tts.ChunkedStream):
                 item = await q.get()
                 if item is None:
                     break
-                # F3: 异常不 raise，记录并继续
                 if isinstance(item, Exception):
                     logger.warning(f"[TTS] Worker error (non-fatal): {item}")
                     break
@@ -433,8 +452,9 @@ class QwenTTSStream(tts.ChunkedStream):
                 got_audio = True
                 total_bytes += len(item)
                 output_emitter.push(item)
+                if CAPTURE_PRE_RTC:
+                    pre_rtc_chunks.append(item)
                 if first_push and tid:
-                    # F5: 无条件记录（不再要求 t_stt_done）
                     _tracer.mark(tid, "t_agent_publish_first_frame")
                     first_push = False
 
@@ -450,6 +470,22 @@ class QwenTTSStream(tts.ChunkedStream):
                 logger.info(f"[TTS] Done: {total_bytes}B ({duration:.2f}s) "
                             f"frames={total_bytes // frame_bytes}")
 
+                # D7 Ring1: 落盘 pre_rtc.wav
+                if CAPTURE_PRE_RTC and pre_rtc_chunks and PRE_RTC_DIR:
+                    try:
+                        pre_rtc_path = os.path.join(PRE_RTC_DIR, "pre_rtc.wav")
+                        os.makedirs(PRE_RTC_DIR, exist_ok=True)
+                        pcm = b"".join(pre_rtc_chunks)
+                        import wave as _wave
+                        with _wave.open(pre_rtc_path, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(SAMPLE_RATE_TTS)
+                            wf.writeframes(pcm)
+                        logger.info(f"[TTS] Ring1 pre_rtc saved: {pre_rtc_path} ({len(pcm)}B)")
+                    except Exception as e:
+                        logger.warning(f"[TTS] Ring1 save error: {e}")
+
         except Exception as e:
             logger.error(f"[TTS] Error: {e}")
             try:
@@ -459,6 +495,9 @@ class QwenTTSStream(tts.ChunkedStream):
                 pass
         finally:
             stop_event.set()
+            # D7: 立刻 finalize（在 finally 里，确保即使 disconnect 也能写入）
+            if tid:
+                _tracer.finalize(tid)
 
     def _stream_tts_worker(self, text, trace_id, frame_bytes, loop, out_queue, stop_event):
         """F3: 边收边推 worker，安全处理所有异常"""
@@ -510,6 +549,9 @@ class QwenVoiceAgent(Agent):
         self._llm_instance = OmniLLM()
         self._tts_instance = QwenTTS()
 
+        # D7: 让 STT 能在 recognize 开始时 propagate trace_id 给 LLM/TTS
+        self._stt_instance.set_siblings(self._llm_instance, self._tts_instance)
+
         super().__init__(
             instructions="你是一个友好的语音助手。用中文回复，自然口语化。注意结合对话上下文。",
             stt=self._stt_instance,
@@ -554,17 +596,19 @@ class QwenVoiceAgent(Agent):
                     text = c.strip()
                     break
 
-        # F5: 无论 AutoRTC 还是手动，都创建 trace
-        tid = self._active_trace_id or _tracer.new_trace()
-        self._stt_instance.set_trace_id(tid)
-        self._llm_instance.set_trace_id(tid)
-        self._tts_instance.set_trace_id(tid)
-
+        # D7: trace 已在 STT._recognize_impl 开始时创建并 propagate
+        tid = self._stt_instance._current_trace_id or self._active_trace_id or "unknown"
         logger.info(f"[Agent] Turn [{tid}] text='{text[:50]}'")
 
-        asyncio.get_event_loop().call_later(
-            15.0, lambda: _tracer.finalize(tid, {"user_text": text})
-        )
+        # D7 修复：不用 call_later（子进程退出后会丢失）
+        # 改为在 TTS 完成时由 TTS 触发 finalize
+        # 这里只记录 user_text，finalize 交给 TTS._run 末尾
+        _tracer.mark(tid, "_user_text_ready")
+        if tid in _tracer._traces:
+            _tracer._traces[tid]["user_text"] = text
+
+        # 重置，下一轮 STT 会创建新的
+        self._stt_instance._current_trace_id = None
         self._active_trace_id = None
 
 
@@ -577,7 +621,25 @@ async def entrypoint(ctx):
         await ctx.connect()
         logger.info("[Entry] Room connected")
 
-        participant = await ctx.wait_for_participant()
+        # D7: 等待 user（排除 probe bot 和其他观察者）
+        participant = None
+        for _ in range(60):
+            for pid, p in ctx.room.remote_participants.items():
+                if not p.identity.startswith("autortc-probe"):
+                    participant = p
+                    break
+            if participant:
+                break
+            try:
+                participant = await asyncio.wait_for(
+                    ctx.wait_for_participant(), timeout=1.0)
+                if participant and participant.identity.startswith("autortc-probe"):
+                    participant = None  # 跳过 probe
+                    continue
+            except asyncio.TimeoutError:
+                continue
+        if not participant:
+            participant = await ctx.wait_for_participant()
         logger.info(f"[Entry] Participant: {participant.identity}")
 
         agent = QwenVoiceAgent()
