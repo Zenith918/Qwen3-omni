@@ -1,0 +1,13 @@
+{
+  "cases": [
+    {
+      "case_id": "day1_test_input",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "day2_reply",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    }
+  ]
+}
+

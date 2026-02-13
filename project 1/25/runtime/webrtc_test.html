@@ -278,6 +278,29 @@
       el.querySelector('.visualizer-text').textContent = textMap[state || ''] || '🎤';
     }
 
+    async function unlockPlayback() {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (Ctx) {
+          if (!audioContext) audioContext = new Ctx();
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+          }
+        }
+      } catch (e) {
+        log(`AudioContext resume failed: ${e.message || e}`, 'error');
+      }
+      try {
+        if (agentAudioEl) {
+          agentAudioEl.muted = false;
+          agentAudioEl.volume = 1.0;
+          await agentAudioEl.play();
+        }
+      } catch (e) {
+        log(`Audio unlock play failed: ${e.message || e}`, 'error');
+      }
+    }
+
     // ── 内嵌 Token (7天有效, 到期后在服务器上重新生成) ──
     const EMBEDDED_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiVXNlciIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidm9pY2UtYWdlbnQtdGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9LCJzdWIiOiJ2b2ljZS11c2VyLTEiLCJpc3MiOiJBUEk3ZmozNXdHTHVtdGMiLCJuYmYiOjE3NzA5NDc3MzksImV4cCI6MTc3MTU1MjUzOX0.RhGZpVOEAEiVa4mP6A4-WQD4e6ybjK6w75oB-KePDG8';
     const LIVEKIT_WS = 'wss://renshenghehuoren-mpdsjfwe.livekit.cloud';
@@ -312,6 +335,7 @@
         const btn = document.getElementById('connectBtn');
         btn.disabled = true;
         setStatus('正在连接...', 'connecting');
+        await unlockPlayback();
 
         const { token, url } = await getToken();
         log(`连接到 ${url}`, 'event');
@@ -352,8 +376,12 @@
             if (agentAudioEl) { agentAudioEl.remove(); }
             agentAudioEl = track.attach();
             agentAudioEl.style.display = 'none';
+            agentAudioEl.autoplay = true;
+            agentAudioEl.playsInline = true;
+            agentAudioEl.muted = false;
+            agentAudioEl.volume = 1.0;
             document.body.appendChild(agentAudioEl);
-            agentAudioEl.play().catch(e => log(`Audio play error: ${e}`, 'error'));
+            unlockPlayback().catch(e => log(`Audio play error: ${e}`, 'error'));
             log('🔊 Agent 音频已连接', 'success');
             setVisualizer('speaking');
             // D5: 检测 Agent 音频开始播放

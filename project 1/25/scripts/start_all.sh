@@ -68,9 +68,19 @@ status() {
     echo ""
     echo -e "${GREEN}═══ 访问地址 ═══${NC}"
     POD_ID="${RUNPOD_POD_ID:-bw99o2iauzf2hb}"
-    echo -e "  🌐 前端:  https://${POD_ID}-9091.proxy.runpod.net/"
-    echo -e "  🔑 Token: https://${POD_ID}-9091.proxy.runpod.net/api/token"
-    echo -e "  ❤️  Health: https://${POD_ID}-9091.proxy.runpod.net/api/health"
+    echo -e "  🌐 前端:  https://${POD_ID}-8888.proxy.runpod.net/proxy/3000/"
+    echo -e "  🔑 Token: http://localhost:3000/api/token"
+    echo -e "  ❤️  Health: http://localhost:3000/api/health"
+    
+    # F4: Agent 健康检查 — 检测进程池是否耗尽
+    if pgrep -f "livekit_agent.py" > /dev/null; then
+        EXITS=$(grep -c "process exiting" /tmp/livekit_agent*.log 2>/dev/null)
+        REGS=$(grep -c "registered" /tmp/livekit_agent*.log 2>/dev/null)
+        if [ "$EXITS" -gt 4 ] && [ "$EXITS" -gt "$((REGS * 3))" ]; then
+            echo -e "  ${RED}⚠️  Agent 进程池可能耗尽 (exits=$EXITS, regs=$REGS)${NC}"
+            echo -e "  ${YELLOW}   建议: bash scripts/start_all.sh restart${NC}"
+        fi
+    fi
 }
 
 stop_service() {
