@@ -702,5 +702,6 @@ if __name__ == "__main__":
             api_secret=os.environ.get("LIVEKIT_API_SECRET"),
             ws_url=os.environ.get("LIVEKIT_URL"),
             port=8089,
+            num_idle_processes=8,  # D8: 增大进程池，防止 16 case 耗尽
         ),
     )

@@ -228,7 +228,7 @@ def main() -> int:
             _delete_room()
         except Exception:
             pass
-        time.sleep(4)  # 给 Agent 子进程充足的回收时间（默认池 4 个）
+        time.sleep(8)  # D8: 给 Agent 子进程充足的回收时间（16 case 需要更长）
 
         ok = user_rc == 0 and probe_rc == 0 and bool(probe_res.get("ok"))
         case_result = {
