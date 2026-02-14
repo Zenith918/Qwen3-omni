@@ -1,0 +1,74 @@
+{
+  "cases": [
+    {
+      "case_id": "endpoint_short_hello",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "endpoint_fast_speech",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "endpoint_long_sentence",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "endpoint_low_volume_like",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "interrupt_once",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "interrupt_twice",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "noise_background",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "noise_cough_laugh",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "stress_20_turns_01",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "stress_20_turns_02",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "quality_short_text_guard",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "quality_continuation_trigger",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav"
+    },
+    {
+      "case_id": "boom_trigger",
+      "wav": "/workspace/project 1/25/output/autortc_cases/boom_trigger.wav"
+    },
+    {
+      "case_id": "speed_drift",
+      "wav": "/workspace/project 1/25/output/autortc_cases/speed_drift.wav"
+    },
+    {
+      "case_id": "distortion_sibilant",
+      "wav": "/workspace/project 1/25/output/autortc_cases/distortion_sibilant.wav"
+    },
+    {
+      "case_id": "stutter_long_pause",
+      "wav": "/workspace/project 1/25/output/autortc_cases/stutter_long_pause.wav",
+      "expected_silences": [
+        [
+          2.5,
+          4.5
+        ]
+      ]
+    }
+  ]
+}

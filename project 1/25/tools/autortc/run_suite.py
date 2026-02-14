@@ -31,11 +31,20 @@ def _load_json(path: str) -> dict:
         return json.load(f)
 
 
-def _build_cases(wavs: list[str]) -> list[tuple[str, str]]:
+def _build_cases(wavs: list[str]) -> list[tuple]:
     cases = []
     for w in wavs:
         case_id = Path(w).stem
-        cases.append((case_id, w))
+        cases.append((case_id, w, {}))
+    return cases
+
+
+def _build_nightly_cases(wavs: list[str], turns: int = 20) -> list[tuple]:
+    """D8 nightly: 同一个 wav 重复 N 轮（测内存泄漏/延迟漂移）"""
+    cases = []
+    wav = wavs[0] if wavs else ""
+    for i in range(turns):
+        cases.append((f"nightly_turn_{i:03d}", wav, {}))
     return cases
 
 
@@ -47,7 +56,7 @@ def _build_cases_from_json(path: str) -> list[tuple[str, str]]:
         case_id = item.get("case_id") or f"case_{idx:03d}"
         wav = item.get("wav", "")
         if wav:
-            cases.append((case_id, wav))
+            cases.append((case_id, wav, item))  # D8: 传完整 item（含 expected_silences）
     return cases
 
 
@@ -83,7 +92,14 @@ def main() -> int:
 
     user_bot = os.path.join(os.path.dirname(__file__), "user_bot.py")
     probe_bot = os.path.join(os.path.dirname(__file__), "probe_bot.py")
-    cases = _build_cases_from_json(args.cases_json) if args.cases_json else _build_cases(args.wavs)
+    if args.mode == "nightly":
+        cases = _build_nightly_cases(args.wavs or [
+            os.path.join(os.path.dirname(__file__), "..", "..", "output", "day1_test_input.wav")
+        ], turns=20)
+    elif args.cases_json:
+        cases = _build_cases_from_json(args.cases_json)
+    else:
+        cases = _build_cases(args.wavs)
     if not cases:
         print("no cases found: provide --wavs or --cases_json with valid entries", file=sys.stderr)
         return 1
@@ -92,7 +108,9 @@ def main() -> int:
     ensure_parent(traces_path)
     summary = {"run_id": run_id, "room": args.room, "cases": []}
 
-    for idx, (case_id, wav_path) in enumerate(cases):
+    for idx, case_tuple in enumerate(cases):
+        case_id, wav_path = case_tuple[0], case_tuple[1]
+        case_meta = case_tuple[2] if len(case_tuple) > 2 else {}
         user_identity = args.user_identity
         probe_identity = args.probe_identity
 
@@ -139,6 +157,11 @@ def main() -> int:
             "--result_json",
             probe_json,
         ]
+        # D8: 设置 pre_rtc 落盘目录（Agent 通过环境变量读取）
+        case_pre_rtc_dir = os.path.join(run_dir, case_id)
+        os.environ["PRE_RTC_DIR"] = case_pre_rtc_dir
+        os.environ["CAPTURE_PRE_RTC"] = "1"
+
         user_cmd = [
             sys.executable,
             user_bot,
@@ -213,6 +236,7 @@ def main() -> int:
             "wav": wav_path,
             "room": case_room,
             "ok": ok,
+            "expected_silences": case_meta.get("expected_silences"),
             "user_identity": user_identity,
             "probe_identity": probe_identity,
             "user_rc": user_rc,

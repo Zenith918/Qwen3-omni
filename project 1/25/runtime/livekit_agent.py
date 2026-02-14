@@ -66,9 +66,10 @@ ENABLE_CONTINUATION = os.environ.get("ENABLE_CONTINUATION", "1") == "1"
 TRACE_DIR = os.environ.get("TRACE_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output"))
 
-# D7: Ring1 Pre-RTC 录音开关
+# D7/D8: Ring1 Pre-RTC 录音
 CAPTURE_PRE_RTC = os.environ.get("CAPTURE_PRE_RTC", "1") == "1"
-PRE_RTC_DIR = os.environ.get("PRE_RTC_DIR", "")
+PRE_RTC_BASE_DIR = os.environ.get("PRE_RTC_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output", "pre_rtc"))
 
 # ══════════════════════════════════════════════════════════════
 # Trace 收集器（F5: 同时支持 AutoRTC 和手动连接）
@@ -470,11 +471,15 @@ class QwenTTSStream(tts.ChunkedStream):
                 logger.info(f"[TTS] Done: {total_bytes}B ({duration:.2f}s) "
                             f"frames={total_bytes // frame_bytes}")
 
-                # D7 Ring1: 落盘 pre_rtc.wav
-                if CAPTURE_PRE_RTC and pre_rtc_chunks and PRE_RTC_DIR:
+                # D8 Ring1: 落盘 pre_rtc.wav（用 trace_id 作为子目录）
+                if CAPTURE_PRE_RTC and pre_rtc_chunks and tid:
                     try:
-                        pre_rtc_path = os.path.join(PRE_RTC_DIR, "pre_rtc.wav")
-                        os.makedirs(PRE_RTC_DIR, exist_ok=True)
+                        # 从 trace 里取 case_id 来构建路径
+                        trace_data = _tracer.get(tid) if tid in _tracer._traces else {}
+                        case_id = trace_data.get("case_id", tid)
+                        pre_dir = os.path.join(PRE_RTC_BASE_DIR, case_id)
+                        os.makedirs(pre_dir, exist_ok=True)
+                        pre_rtc_path = os.path.join(pre_dir, "pre_rtc.wav")
                         pcm = b"".join(pre_rtc_chunks)
                         import wave as _wave
                         with _wave.open(pre_rtc_path, "wb") as wf:
@@ -482,9 +487,9 @@ class QwenTTSStream(tts.ChunkedStream):
                             wf.setsampwidth(2)
                             wf.setframerate(SAMPLE_RATE_TTS)
                             wf.writeframes(pcm)
-                        logger.info(f"[TTS] Ring1 pre_rtc saved: {pre_rtc_path} ({len(pcm)}B)")
+                        logger.info(f"[TTS] Ring1: {pre_rtc_path} ({len(pcm)}B)")
                     except Exception as e:
-                        logger.warning(f"[TTS] Ring1 save error: {e}")
+                        logger.warning(f"[TTS] Ring1 error: {e}")
 
         except Exception as e:
             logger.error(f"[TTS] Error: {e}")
