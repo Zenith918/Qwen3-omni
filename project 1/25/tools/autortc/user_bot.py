@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+D9 user_bot: publish wav as realtime mic audio.
+Waits for probe_ready barrier before sending frames.
+"""
 import argparse
 import asyncio
 import json
@@ -20,6 +24,24 @@ DEFAULT_SR = 48000
 
 async def run_user_bot(args: argparse.Namespace) -> None:
     room = rtc.Room()
+
+    # ── D9 P0-2: probe_ready barrier ──
+    # D10 P0-2: dual ACK — wait for both probe_ready AND agent_ready
+    probe_ready_event = asyncio.Event()
+    agent_ready_event = asyncio.Event()
+
+    def _on_data_received(data_packet):
+        try:
+            topic = getattr(data_packet, "topic", "")
+            payload = json.loads(data_packet.data.decode("utf-8"))
+            if topic == "autortc.probe" or payload.get("event") == "probe_ready":
+                probe_ready_event.set()
+            if topic == "autortc.agent_ready" or payload.get("type") == "autortc_agent_ready":
+                agent_ready_event.set()
+        except Exception:
+            pass
+
+    room.on("data_received", _on_data_received)
     await room.connect(args.url, args.token)
 
     source = rtc.AudioSource(sample_rate=DEFAULT_SR, num_channels=1)
@@ -33,6 +55,24 @@ async def run_user_bot(args: argparse.Namespace) -> None:
 
     frame_samples = int(DEFAULT_SR * args.frame_ms / 1000)
     frame_samples = max(frame_samples, 1)
+
+    # D10: 等 probe_ready + agent_ready 双向 ACK（有超时兜底）
+    if args.wait_probe_ready_s > 0:
+        try:
+            await asyncio.wait_for(
+                probe_ready_event.wait(),
+                timeout=args.wait_probe_ready_s,
+            )
+        except asyncio.TimeoutError:
+            pass  # probe 超时也继续
+        # D10: 额外等 agent_ready ACK（最多 3s）
+        try:
+            await asyncio.wait_for(
+                agent_ready_event.wait(),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            pass  # agent_ready 超时也继续（兜底兼容）
 
     if args.start_delay_s > 0:
         await asyncio.sleep(args.start_delay_s)
@@ -52,6 +92,8 @@ async def run_user_bot(args: argparse.Namespace) -> None:
             reliable=True,
             topic="autortc.trace",
         )
+        # D10 P0-1: 等 Agent 处理 DataChannel trace event，避免 STT 在收到 trace_id 前启动
+        await asyncio.sleep(0.5)
     next_tick = time.monotonic()
     for idx in range(0, len(audio), frame_samples):
         chunk = audio[idx:idx + frame_samples]
@@ -106,6 +148,8 @@ async def run_user_bot(args: argparse.Namespace) -> None:
                 "t_user_send_end": t_send_end,
                 "audio_samples_48k": int(len(audio)),
                 "audio_duration_s": float(len(audio)) / float(DEFAULT_SR),
+                "probe_ready_received": probe_ready_event.is_set(),
+                "agent_ready_received": agent_ready_event.is_set(),
             },
         )
 
@@ -122,8 +166,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wav", required=True, help="input wav path")
     p.add_argument("--realtime", type=int, default=1, help="1=realtime pace, 0=as fast as possible")
     p.add_argument("--frame_ms", type=int, default=20, help="frame size in ms")
-    p.add_argument("--start_delay_s", type=float, default=2.5, help="delay before sending first frame")
+    p.add_argument("--start_delay_s", type=float, default=1.0, help="delay before sending first frame")
     p.add_argument("--post_silence_ms", type=int, default=300, help="tail wait before exit")
+    p.add_argument("--wait_probe_ready_s", type=float, default=8.0,
+                    help="D9: max wait for probe_ready barrier (0=skip)")
     p.add_argument("--trace_id", default="", help="optional trace id sent via data channel")
     p.add_argument("--case_id", default="", help="optional case id for trace metadata")
     p.add_argument("--turn_id", default="", help="optional turn id for trace metadata")
@@ -133,4 +179,3 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     asyncio.run(run_user_bot(parse_args()))
-

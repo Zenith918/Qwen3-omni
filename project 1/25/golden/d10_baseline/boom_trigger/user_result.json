@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "room": "voice-agent-test-boom_trigger-071946",
+  "wav": "/workspace/project 1/25/output/autortc_cases/boom_trigger.wav",
+  "frame_ms": 20,
+  "realtime": 1,
+  "t_user_send_start": 1771227003.3386195,
+  "t_user_send_end": 1771227006.8034513,
+  "audio_samples_48k": 127200,
+  "audio_duration_s": 2.65,
+  "probe_ready_received": true,
+  "agent_ready_received": true
+}

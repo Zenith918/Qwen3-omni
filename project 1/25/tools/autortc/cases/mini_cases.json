@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "case_id": "endpoint_short_hello",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "endpoint_long_sentence",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "interrupt_once",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    },
+    {
+      "case_id": "noise_background",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav"
+    }
+  ]
+}

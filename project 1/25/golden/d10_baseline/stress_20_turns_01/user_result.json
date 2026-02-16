@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "room": "voice-agent-test-stress_20_turns_01-071946",
+  "wav": "/workspace/project 1/25/output/day1_test_input.wav",
+  "frame_ms": 20,
+  "realtime": 1,
+  "t_user_send_start": 1771226820.9744358,
+  "t_user_send_end": 1771226825.2987797,
+  "audio_samples_48k": 168960,
+  "audio_duration_s": 3.52,
+  "probe_ready_received": true,
+  "agent_ready_received": true
+}

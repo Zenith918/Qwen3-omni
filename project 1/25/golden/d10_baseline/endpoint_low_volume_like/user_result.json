@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "room": "voice-agent-test-endpoint_low_volume_like-071946-r1",
+  "wav": "/workspace/project 1/25/output/day2_reply.wav",
+  "frame_ms": 20,
+  "realtime": 1,
+  "t_user_send_start": 1771226593.720887,
+  "t_user_send_end": 1771226597.168243,
+  "audio_samples_48k": 126720,
+  "audio_duration_s": 2.64,
+  "probe_ready_received": true,
+  "agent_ready_received": true
+}

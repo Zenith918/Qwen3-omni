@@ -1,0 +1,23 @@
+# Ignore large output directories to prevent fileWatcher from
+# consuming excessive CPU and causing SSH connection drops
+**/output/
+**/output/**
+
+# WAV files anywhere
+**/*.wav
+
+# Model files
+**/models/
+**/models/**
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+
+# vLLM build artifacts
+**/vllm-omni/build/
+**/vllm-omni/*.egg-info/
+
+# Logs
+/tmp/*.log
+

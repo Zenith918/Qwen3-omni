@@ -385,6 +385,8 @@ class OmniLLMStream(llm.LLMStream):
 # TTS — 边收边推 + F3: 安全错误处理
 # ══════════════════════════════════════════════════════════════
 class QwenTTS(tts.TTS):
+    _room_ref: "rtc.Room | None" = None  # D9: room reference for DataChannel events
+    _reply_seq: int = 0  # D9: reply sequence counter
     def __init__(self):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
@@ -408,6 +410,7 @@ class QwenTTSStream(tts.ChunkedStream):
                          conn_options=conn_options or APIConnectOptions())
         self._text = text
         self._trace_id = trace_id
+        self._tts_instance = tts_instance
 
     async def _run(self, output_emitter):
         text = self._text
@@ -458,6 +461,8 @@ class QwenTTSStream(tts.ChunkedStream):
                 if first_push and tid:
                     _tracer.mark(tid, "t_agent_publish_first_frame")
                     first_push = False
+                    # D9 P0-1: 发 reply_start DataChannel 事件
+                    self._send_reply_event(tid, "reply_start")
 
             await worker
 
@@ -470,26 +475,8 @@ class QwenTTSStream(tts.ChunkedStream):
                 duration = total_bytes / 2 / SAMPLE_RATE_TTS
                 logger.info(f"[TTS] Done: {total_bytes}B ({duration:.2f}s) "
                             f"frames={total_bytes // frame_bytes}")
-
-                # D8 Ring1: 落盘 pre_rtc.wav（用 trace_id 作为子目录）
-                if CAPTURE_PRE_RTC and pre_rtc_chunks and tid:
-                    try:
-                        # 从 trace 里取 case_id 来构建路径
-                        trace_data = _tracer.get(tid) if tid in _tracer._traces else {}
-                        case_id = trace_data.get("case_id", tid)
-                        pre_dir = os.path.join(PRE_RTC_BASE_DIR, case_id)
-                        os.makedirs(pre_dir, exist_ok=True)
-                        pre_rtc_path = os.path.join(pre_dir, "pre_rtc.wav")
-                        pcm = b"".join(pre_rtc_chunks)
-                        import wave as _wave
-                        with _wave.open(pre_rtc_path, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(SAMPLE_RATE_TTS)
-                            wf.writeframes(pcm)
-                        logger.info(f"[TTS] Ring1: {pre_rtc_path} ({len(pcm)}B)")
-                    except Exception as e:
-                        logger.warning(f"[TTS] Ring1 error: {e}")
+                # D9 P0-1: 发 reply_end DataChannel 事件
+                self._send_reply_event(tid, "reply_end")
 
         except Exception as e:
             logger.error(f"[TTS] Error: {e}")
@@ -499,10 +486,54 @@ class QwenTTSStream(tts.ChunkedStream):
             except Exception:
                 pass
         finally:
+            # D10 P0-1: Ring1 落盘移到 finally — 即使 TTS 中断/异常也保存已收集的 chunks
+            if CAPTURE_PRE_RTC and pre_rtc_chunks and tid:
+                try:
+                    pcm = b"".join(pre_rtc_chunks)
+                    import wave as _wave
+                    pre_dir = os.path.join(PRE_RTC_BASE_DIR, tid)
+                    os.makedirs(pre_dir, exist_ok=True)
+                    pre_rtc_path = os.path.join(pre_dir, "pre_rtc.wav")
+                    with _wave.open(pre_rtc_path, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(SAMPLE_RATE_TTS)
+                        wf.writeframes(pcm)
+                    logger.info(f"[TTS] Ring1: {pre_rtc_path} ({len(pcm)}B)")
+                except Exception as e:
+                    logger.warning(f"[TTS] Ring1 error: {e}")
             stop_event.set()
             # D7: 立刻 finalize（在 finally 里，确保即使 disconnect 也能写入）
             if tid:
                 _tracer.finalize(tid)
+
+    def _send_reply_event(self, tid: str, event_name: str):
+        """D9: send reply_start / reply_end via DataChannel to probe_bot"""
+        room = getattr(self._tts_instance, "_room_ref", None)
+        if not room:
+            return
+        try:
+            trace_data = _tracer.get(tid) if tid in _tracer._traces else {}
+            seq = getattr(self._tts_instance, "_reply_seq", 0)
+            if event_name == "reply_end":
+                self._tts_instance._reply_seq = seq + 1  # increment AFTER end, so start/end share same seq
+            payload = json.dumps({
+                "type": "autortc_reply",
+                "event": event_name,
+                "trace_id": tid,
+                "case_id": trace_data.get("case_id", ""),
+                "reply_seq": seq,
+                "t_ms": time.time(),
+            }, ensure_ascii=False)
+            # fire-and-forget via event loop
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                room.local_participant.publish_data(
+                    payload, reliable=True, topic="autortc.reply",
+                )
+            )
+        except Exception as e:
+            logger.debug(f"[TTS] reply event send err: {e}")
 
     def _stream_tts_worker(self, text, trace_id, frame_bytes, loop, out_queue, stop_event):
         """F3: 边收边推 worker，安全处理所有异常"""
@@ -511,7 +542,7 @@ class QwenTTSStream(tts.ChunkedStream):
         first_chunk = True
         resp = None
         try:
-            resp = requests.post(TTS_URL, json=payload, stream=True, timeout=60)
+            resp = requests.post(TTS_URL, json=payload, stream=True, timeout=(5, 15))
             resp.raise_for_status()
 
             for chunk in resp.iter_content(chunk_size=4096):
@@ -650,12 +681,37 @@ async def entrypoint(ctx):
         agent = QwenVoiceAgent()
         session = AgentSession()
 
-        # DataChannel 监听（AutoRTC trace 透传）
+        # DataChannel 监听（AutoRTC trace 透传 + probe_ready/agent_ready 双向 ACK）
         def _on_data_received(data_packet):
             try:
-                if getattr(data_packet, "topic", "") != "autortc.trace":
-                    return
+                topic = getattr(data_packet, "topic", "")
                 payload = json.loads(data_packet.data.decode("utf-8"))
+
+                # D10 P0-2: probe_ready → agent 回 agent_ready ACK
+                # probe sends topic="autortc.probe" type="autortc_probe" event="probe_ready"
+                if (topic == "autortc.probe_ready" or topic == "autortc.probe"
+                        or payload.get("type") in ("autortc_probe_ready", "autortc_probe")):
+                    trace_id = payload.get("trace_id", "")
+                    logger.info(f"[Barrier] Received probe_ready, trace={trace_id}")
+                    try:
+                        ack = json.dumps({
+                            "type": "autortc_agent_ready",
+                            "trace_id": trace_id,
+                            "t_ms": time.time(),
+                        }, ensure_ascii=False)
+                        import asyncio as _aio
+                        _aio.ensure_future(
+                            ctx.room.local_participant.publish_data(
+                                ack, reliable=True, topic="autortc.agent_ready"
+                            )
+                        )
+                        logger.info(f"[Barrier] Sent agent_ready ACK, trace={trace_id}")
+                    except Exception as e:
+                        logger.warning(f"[Barrier] agent_ready send error: {e}")
+                    return
+
+                if topic != "autortc.trace":
+                    return
                 if payload.get("type") != "autortc_trace":
                     return
                 trace_id = payload.get("trace_id", "")
@@ -678,6 +734,9 @@ async def entrypoint(ctx):
                 logger.warning(f"[Trace] DC parse error: {e}")
 
         ctx.room.on("data_received", _on_data_received)
+
+        # D9: 让 TTS 能发 DataChannel reply 事件
+        agent._tts_instance._room_ref = ctx.room
 
         await session.start(agent, room=ctx.room)
         logger.info("[Entry] Session started")

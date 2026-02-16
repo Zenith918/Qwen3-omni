@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""
+D12: AutoBrowser Run Suite — Real Browser WYSIWYG regression.
+
+Uses Playwright to launch Chromium with fake media (--use-file-for-fake-audio-capture),
+open webrtc_test.html, and collect browser-side traces + recorded audio.
+
+Usage:
+    python3 tools/autobrowser/run_suite.py --mode fast --cases_json tools/autortc/cases/all_cases.json
+    python3 tools/autobrowser/run_suite.py --mode fast --cases_json tools/autortc/cases/mini_cases.json --net wifi_good
+"""
+import argparse
+import asyncio
+import base64
+import json
+import math
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import time
+import wave
+from datetime import datetime
+from pathlib import Path
+
+import requests
+
+# ── Reuse common utilities from autortc ──
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+AUTORTC_DIR = os.path.join(SCRIPT_DIR, "..", "autortc")
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+sys.path.insert(0, AUTORTC_DIR)
+from common import ensure_parent, wav_duration_s, write_json
+
+# ── Net profile configs (P0-4) ──
+NET_PROFILES = {
+    "wifi_good": {
+        "description": "Baseline WiFi: no impairment",
+        "delay_ms": 0,
+        "jitter_ms": 0,
+        "loss_pct": 0,
+    },
+    "4g_ok": {
+        "description": "4G: 60ms RTT + 20ms jitter + 0.5% loss",
+        "delay_ms": 30,   # one-way → RTT ~60ms
+        "jitter_ms": 20,
+        "loss_pct": 0.5,
+    },
+    "bad_wifi": {
+        "description": "Bad WiFi: 100ms RTT + 40ms jitter + 2% loss",
+        "delay_ms": 50,
+        "jitter_ms": 40,
+        "loss_pct": 2.0,
+    },
+}
+
+
+def _ts_run_id() -> str:
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def _fetch_token(token_api: str, room: str, identity: str) -> tuple:
+    """Fetch LiveKit token from token server."""
+    r = requests.get(token_api, params={"room": room, "identity": identity}, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    return data["token"], data["url"]
+
+
+def _load_cases_json(path: str) -> list:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    cases = []
+    for idx, item in enumerate(data.get("cases", [])):
+        case_id = item.get("case_id") or f"case_{idx:03d}"
+        wav = item.get("wav", "")
+        tier = item.get("tier", "P0")
+        if wav:
+            cases.append({"case_id": case_id, "wav": wav, "tier": tier, **item})
+    return cases
+
+
+def _apply_netem(interface: str, profile_name: str) -> bool:
+    """Apply tc netem profile. Returns True if applied."""
+    profile = NET_PROFILES.get(profile_name)
+    if not profile or profile_name == "wifi_good":
+        return False  # baseline = no impairment
+    try:
+        # Clear existing rules
+        subprocess.run(["tc", "qdisc", "del", "dev", interface, "root"],
+                       capture_output=True, check=False)
+        # Apply netem
+        cmd = [
+            "tc", "qdisc", "add", "dev", interface, "root", "netem",
+            "delay", f"{profile['delay_ms']}ms", f"{profile['jitter_ms']}ms",
+            "loss", f"{profile['loss_pct']}%",
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        print(f"[netem] Applied {profile_name}: {profile['description']}")
+        return True
+    except Exception as e:
+        print(f"[netem] WARNING: Failed to apply {profile_name}: {e}")
+        return False
+
+
+def _clear_netem(interface: str):
+    """Remove tc netem rules."""
+    try:
+        subprocess.run(["tc", "qdisc", "del", "dev", interface, "root"],
+                       capture_output=True, check=False)
+    except Exception:
+        pass
+
+
+def _convert_wav_for_chromium(src_wav: str, dst_wav: str) -> str:
+    """
+    Chromium's --use-file-for-fake-audio-capture requires:
+    - WAV format, PCM 16-bit
+    - Sample rate that Chromium accepts (ideally 48000 or 16000)
+    Returns path to converted file.
+    """
+    try:
+        import numpy as np
+        with wave.open(src_wav, "rb") as wf:
+            sr = wf.getframerate()
+            n_channels = wf.getnchannels()
+            raw = wf.readframes(wf.getnframes())
+        audio = np.frombuffer(raw, dtype=np.int16)
+        if n_channels > 1:
+            audio = audio.reshape(-1, n_channels)[:, 0]
+
+        # Resample to 48000 for Chromium
+        target_sr = 48000
+        if sr != target_sr:
+            n_dst = int(round(len(audio) * target_sr / sr))
+            xp = np.arange(len(audio), dtype=np.float64)
+            xnew = np.linspace(0, len(audio) - 1, n_dst, dtype=np.float64)
+            audio = np.clip(np.interp(xnew, xp, audio.astype(np.float32)),
+                            -32768, 32767).astype(np.int16)
+            sr = target_sr
+
+        ensure_parent(dst_wav)
+        with wave.open(dst_wav, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(audio.tobytes())
+        return dst_wav
+    except Exception as e:
+        print(f"  WARN: WAV conversion failed: {e}, using original")
+        return src_wav
+
+
+async def _run_browser_case(
+    page_url: str,
+    case_wav_48k: str,
+    token: str,
+    lk_url: str,
+    room: str,
+    identity: str,
+    trace_id: str,
+    case_id: str,
+    turn_id: str,
+    record_seconds: int,
+    case_dir: str,
+    headless: bool = True,
+) -> dict:
+    """
+    Launch Chromium via Playwright, open webrtc_test.html with auto params,
+    wait for traces, collect recording + browser_trace.json.
+    """
+    from playwright.async_api import async_playwright
+
+    result = {
+        "ok": False,
+        "joined": False,
+        "has_reply_audio": False,
+        "browser_traces": [],
+        "error": None,
+    }
+
+    # Build URL with auto params
+    from urllib.parse import urlencode, quote
+    params = {
+        "auto": "1",
+        "lk_token": token,
+        "lk_url": lk_url,
+        "room": room,
+        "identity": identity,
+        "trace_id": trace_id,
+        "case_id": case_id,
+        "turn_id": turn_id,
+        "auto_disconnect_s": str(record_seconds),
+    }
+    full_url = f"{page_url}?{urlencode(params)}"
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--use-fake-ui-for-media-stream",
+                "--use-fake-device-for-media-stream",
+                f"--use-file-for-fake-audio-capture={case_wav_48k}",
+                "--autoplay-policy=no-user-gesture-required",
+                "--disable-gpu",
+                "--no-sandbox",
+                # Allow autoplay
+                "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
+            ],
+        )
+        context = await browser.new_context(
+            permissions=["microphone"],
+            ignore_https_errors=True,
+        )
+        page = await context.new_page()
+
+        # Collect console logs
+        console_logs = []
+        page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
+
+        try:
+            await page.goto(full_url, wait_until="domcontentloaded", timeout=15000)
+
+            # Wait for join
+            try:
+                await page.wait_for_function(
+                    "window.__autobrowser_joined === true",
+                    timeout=20000,
+                )
+                result["joined"] = True
+            except Exception as e:
+                result["error"] = f"Join timeout: {e}"
+                return result
+
+            # D12: Mute mic after wav duration to simulate user stopping speech.
+            # Chromium fake audio capture loops the file, so we must explicitly
+            # mute to create the silence gap that triggers EoT detection.
+            # We also RESET the browser trace so only post-mute EoT→playout
+            # is measured (avoiding spurious KPI=0 from early agent responses).
+            wav_dur = wav_duration_s(case_wav_48k) if case_wav_48k else 3.0
+            mute_delay = wav_dur + 2.0  # extra 2s for LiveKit join + first audio to start
+            await asyncio.sleep(mute_delay)
+            try:
+                await page.evaluate("""
+                    async () => {
+                        if (window.room && window.room.localParticipant) {
+                            await window.room.localParticipant.setMicrophoneEnabled(false);
+                            console.log('[autobrowser:event] Mic muted by harness (simulate user stop)');
+                        }
+                        // Reset trace: only measure EoT→playout AFTER mic mute
+                        if (window.resetForMeasurement) window.resetForMeasurement();
+                    }
+                """)
+            except Exception:
+                pass  # non-fatal
+
+            # Wait for auto-disconnect (remaining recording period)
+            try:
+                await page.wait_for_function(
+                    "window.__autobrowser_done === true",
+                    timeout=(record_seconds + 15) * 1000,
+                )
+            except Exception:
+                # Timeout is expected if auto_disconnect_s worked
+                pass
+
+            # Collect browser traces
+            traces = await page.evaluate("window.__autobrowser_traces || []")
+            result["browser_traces"] = traces
+
+            # Check if we got reply audio
+            has_blob = await page.evaluate("!!window.__autobrowser_recording_blob")
+            result["has_reply_audio"] = has_blob
+
+            # Save recording via page-side download
+            if has_blob:
+                try:
+                    # Convert blob to base64 in browser
+                    b64_data = await page.evaluate("""
+                        async () => {
+                            const blob = window.__autobrowser_recording_blob;
+                            if (!blob) return null;
+                            const buffer = await blob.arrayBuffer();
+                            const bytes = new Uint8Array(buffer);
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i++) {
+                                binary += String.fromCharCode(bytes[i]);
+                            }
+                            return btoa(binary);
+                        }
+                    """)
+                    if b64_data:
+                        raw = base64.b64decode(b64_data)
+                        webm_path = os.path.join(case_dir, "post_browser_reply.webm")
+                        ensure_parent(webm_path)
+                        with open(webm_path, "wb") as f:
+                            f.write(raw)
+                        result["recording_webm"] = webm_path
+                        result["recording_bytes"] = len(raw)
+
+                        # Convert webm → wav using ffmpeg if available
+                        wav_path = os.path.join(case_dir, "post_browser_reply.wav")
+                        try:
+                            subprocess.run(
+                                ["ffmpeg", "-y", "-i", webm_path, "-ar", "48000",
+                                 "-ac", "1", "-sample_fmt", "s16", wav_path],
+                                capture_output=True, timeout=30, check=True,
+                            )
+                            result["recording_wav"] = wav_path
+                        except (FileNotFoundError, subprocess.CalledProcessError):
+                            # ffmpeg not available, keep webm
+                            pass
+                except Exception as e:
+                    result["error"] = f"Recording save error: {e}"
+
+            # Check for errors
+            error = await page.evaluate("window.__autobrowser_error")
+            if error:
+                result["error"] = error
+
+            result["ok"] = result["joined"] and (len(traces) > 0 or result["has_reply_audio"])
+
+        except Exception as e:
+            result["error"] = str(e)
+        finally:
+            # Save console logs
+            log_path = os.path.join(case_dir, "browser_console.log")
+            ensure_parent(log_path)
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(console_logs))
+
+            await context.close()
+            await browser.close()
+
+    return result
+
+
+def _delete_room(room: str, lk_url: str):
+    """Delete LiveKit room after case completes."""
+    try:
+        import asyncio as _aio
+        from livekit import api as _lk_api
+        def _do_delete():
+            async def _inner():
+                lk = _lk_api.LiveKitAPI(
+                    url=lk_url,
+                    api_key=os.environ.get("LIVEKIT_API_KEY", "API7fj35wGLumtc"),
+                    api_secret=os.environ.get("LIVEKIT_API_SECRET", "WK8k8fUhhsHoa2R2qfO076lyuDHgJubwemQuY4nk398B"),
+                )
+                await lk.room.delete_room(_lk_api.DeleteRoomRequest(room=room))
+                await lk.aclose()
+            _aio.run(_inner())
+        _do_delete()
+    except Exception:
+        pass
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="D12 AutoBrowser: real-browser WYSIWYG regression")
+    p.add_argument("--mode", default="fast", choices=["fast", "nightly"],
+                   help="fast=per-case room, nightly=multi-turn")
+    p.add_argument("--cases_json", required=True, help="path to cases JSON")
+    p.add_argument("--page_url", default="", help="webrtc_test.html URL (auto-detect from token_server)")
+    p.add_argument("--token_api", default="http://127.0.0.1:9090/api/token",
+                   help="token server API")
+    p.add_argument("--room_prefix", default="autobrowser", help="room name prefix")
+    p.add_argument("--identity", default="browser-user-1", help="browser user identity")
+    p.add_argument("--run_id", default="", help="optional run_id")
+    p.add_argument("--output_root", default="output/autobrowser", help="output directory")
+    p.add_argument("--record_s", type=int, default=25,
+                   help="per-case recording window (seconds)")
+    p.add_argument("--headless", type=int, default=1, help="1=headless, 0=visible browser")
+    p.add_argument("--net", default="wifi_good", choices=list(NET_PROFILES.keys()),
+                   help="network profile for tc netem")
+    p.add_argument("--net_interface", default="eth0", help="network interface for netem")
+    p.add_argument("--with_metrics", type=int, default=1, help="1=run audio_metrics after suite")
+    p.add_argument("--baseline_summary", default="", help="D11: golden baseline summary.json")
+    p.add_argument("--inter_case_wait_s", type=int, default=20,
+                   help="wait between cases for agent pool recovery")
+    p.add_argument("--p0_only", type=int, default=0, help="1=only run P0 cases")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    run_id = args.run_id or _ts_run_id()
+    net_suffix = f"_{args.net}" if args.net != "wifi_good" else ""
+    run_dir = os.path.join(args.output_root, f"{run_id}{net_suffix}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Auto-detect page URL from token_server
+    page_url = args.page_url
+    if not page_url:
+        # token_api is http://host:port/api/token → page is http://host:port/webrtc_test.html
+        base = args.token_api.rsplit("/api/", 1)[0]
+        page_url = f"{base}/webrtc_test.html"
+
+    # Load cases
+    cases = _load_cases_json(args.cases_json)
+    if args.p0_only:
+        cases = [c for c in cases if c.get("tier", "P0") == "P0"]
+    if not cases:
+        print("ERROR: No cases found", file=sys.stderr)
+        return 1
+
+    print(f"[AutoBrowser] run_id={run_id} mode={args.mode} cases={len(cases)} net={args.net}")
+    print(f"[AutoBrowser] page_url={page_url}")
+    print(f"[AutoBrowser] output={run_dir}")
+
+    # Apply network profile
+    netem_applied = False
+    if args.net != "wifi_good":
+        netem_applied = _apply_netem(args.net_interface, args.net)
+
+    # Prepare WAV cache dir for 48k conversions
+    wav_cache_dir = os.path.join(run_dir, ".wav_cache")
+    os.makedirs(wav_cache_dir, exist_ok=True)
+
+    summary = {
+        "run_id": run_id,
+        "mode": args.mode,
+        "net_profile": args.net,
+        "page_url": page_url,
+        "cases": [],
+    }
+
+    for idx, case in enumerate(cases):
+        case_id = case["case_id"]
+        wav_path = case["wav"]
+        tier = case.get("tier", "P0")
+
+        # Per-case room
+        case_room = f"{args.room_prefix}-{case_id}-{run_id[-6:]}"
+        trace_id = f"{run_id}-{case_id}-turn-{idx:03d}"
+
+        case_dir = os.path.join(run_dir, case_id)
+        os.makedirs(case_dir, exist_ok=True)
+
+        # Convert wav to 48k for Chromium fake capture
+        wav_48k = os.path.join(wav_cache_dir, f"{case_id}_48k.wav")
+        wav_48k = _convert_wav_for_chromium(wav_path, wav_48k)
+
+        # Get token
+        try:
+            token, lk_url = _fetch_token(args.token_api, case_room, args.identity)
+        except Exception as e:
+            print(f"[{idx+1}/{len(cases)}] {case_id} TOKEN FAILED: {e}")
+            summary["cases"].append({
+                "case_id": case_id, "tier": tier, "ok": False,
+                "error": f"token_fetch: {e}", "trace_id": trace_id,
+            })
+            continue
+
+        # Calculate recording time: wav duration + padding
+        wav_dur = wav_duration_s(wav_path)
+        rec_s = max(args.record_s, int(wav_dur) + 15)
+
+        print(f"[{idx+1}/{len(cases)}] {case_id} room={case_room} rec={rec_s}s tier={tier}")
+        t_start = time.time()
+
+        # Run browser case
+        browser_result = asyncio.run(_run_browser_case(
+            page_url=page_url,
+            case_wav_48k=wav_48k,
+            token=token,
+            lk_url=lk_url,
+            room=case_room,
+            identity=args.identity,
+            trace_id=trace_id,
+            case_id=case_id,
+            turn_id=str(idx),
+            record_seconds=rec_s,
+            case_dir=case_dir,
+            headless=bool(args.headless),
+        ))
+
+        t_end = time.time()
+        elapsed = t_end - t_start
+
+        # Save browser_trace.json
+        trace_path = os.path.join(case_dir, "browser_trace.json")
+        write_json(trace_path, {
+            "trace_id": trace_id,
+            "case_id": case_id,
+            "turn_id": str(idx),
+            "tier": tier,
+            "browser_traces": browser_result.get("browser_traces", []),
+            "joined": browser_result.get("joined", False),
+            "has_reply_audio": browser_result.get("has_reply_audio", False),
+            "recording_wav": browser_result.get("recording_wav", ""),
+            "recording_webm": browser_result.get("recording_webm", ""),
+            "recording_bytes": browser_result.get("recording_bytes", 0),
+            "error": browser_result.get("error"),
+            "elapsed_s": elapsed,
+            "net_profile": args.net,
+        })
+
+        # Extract USER_KPI from browser traces
+        user_kpi_ms = None
+        traces = browser_result.get("browser_traces", [])
+        if traces:
+            kpis = [t["user_kpi_ms"] for t in traces if t.get("user_kpi_ms") is not None]
+            if kpis:
+                user_kpi_ms = kpis[0]  # first turn
+
+        status = "PASS" if browser_result["ok"] else "FAIL"
+        join_status = "✅" if browser_result["joined"] else "❌"
+        audio_status = "✅" if browser_result["has_reply_audio"] else "❌"
+        kpi_str = f"{user_kpi_ms}ms" if user_kpi_ms else "N/A"
+        print(f"  {status} join={join_status} audio={audio_status} USER_KPI={kpi_str} ({elapsed:.1f}s)")
+        if browser_result.get("error"):
+            print(f"  ERROR: {browser_result['error']}")
+
+        case_result = {
+            "case_id": case_id,
+            "tier": tier,
+            "ok": browser_result["ok"],
+            "joined": browser_result["joined"],
+            "has_reply_audio": browser_result["has_reply_audio"],
+            "user_kpi_ms": user_kpi_ms,
+            "trace_id": trace_id,
+            "room": case_room,
+            "elapsed_s": elapsed,
+            "error": browser_result.get("error"),
+            "recording_wav": browser_result.get("recording_wav", ""),
+            "browser_trace_count": len(traces),
+        }
+        summary["cases"].append(case_result)
+
+        # Clean up room
+        _delete_room(case_room, lk_url)
+
+        # Inter-case wait
+        if idx < len(cases) - 1:
+            time.sleep(args.inter_case_wait_s)
+
+    # Clear netem
+    if netem_applied:
+        _clear_netem(args.net_interface)
+
+    # Clean up wav cache
+    shutil.rmtree(wav_cache_dir, ignore_errors=True)
+
+    # Summary stats
+    total = len(summary["cases"])
+    ok = sum(1 for c in summary["cases"] if c.get("ok"))
+    joined = sum(1 for c in summary["cases"] if c.get("joined"))
+    has_audio = sum(1 for c in summary["cases"] if c.get("has_reply_audio"))
+
+    summary["total_cases"] = total
+    summary["ok_cases"] = ok
+    summary["joined_cases"] = joined
+    summary["has_audio_cases"] = has_audio
+
+    # USER_KPI aggregates
+    kpi_vals = [c["user_kpi_ms"] for c in summary["cases"]
+                if c.get("user_kpi_ms") is not None]
+    if kpi_vals:
+        import numpy as np
+        arr = np.array(kpi_vals, dtype=np.float64)
+        summary["user_kpi_p50_ms"] = float(np.percentile(arr, 50))
+        summary["user_kpi_p95_ms"] = float(np.percentile(arr, 95))
+        summary["user_kpi_p99_ms"] = float(np.percentile(arr, 99))
+        summary["user_kpi_max_ms"] = float(np.max(arr))
+        summary["user_kpi_count"] = len(kpi_vals)
+
+    summary_path = os.path.join(run_dir, "summary.json")
+    write_json(summary_path, summary)
+
+    # Generate report
+    report_path = os.path.join(run_dir, "report.md")
+    _write_report(report_path, summary, args.net)
+
+    print(f"\n{'='*60}")
+    print(f"[AutoBrowser] RESULT: {ok}/{total} cases OK")
+    print(f"[AutoBrowser] Joined: {joined}/{total}")
+    print(f"[AutoBrowser] Has Audio: {has_audio}/{total}")
+    if kpi_vals:
+        print(f"[AutoBrowser] USER_KPI P50={summary['user_kpi_p50_ms']:.0f}ms "
+              f"P95={summary['user_kpi_p95_ms']:.0f}ms "
+              f"P99={summary['user_kpi_p99_ms']:.0f}ms")
+    print(f"[AutoBrowser] Net Profile: {args.net}")
+    print(f"[AutoBrowser] Summary: {summary_path}")
+    print(f"[AutoBrowser] Report: {report_path}")
+
+    return 0 if ok == total else 2
+
+
+def _write_report(report_path: str, summary: dict, net_profile: str):
+    """Generate markdown report."""
+    ensure_parent(report_path)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# AutoBrowser Report (D12)\n\n")
+
+        f.write("## USER KPI (Browser-side WYSIWYG)\n\n")
+        if summary.get("user_kpi_p50_ms") is not None:
+            f.write(f"- **USER_KPI P50**: `{summary['user_kpi_p50_ms']:.0f}` ms\n")
+            f.write(f"- **USER_KPI P95**: `{summary['user_kpi_p95_ms']:.0f}` ms\n")
+            f.write(f"- **USER_KPI P99**: `{summary['user_kpi_p99_ms']:.0f}` ms\n")
+            f.write(f"- **USER_KPI Max**: `{summary['user_kpi_max_ms']:.0f}` ms\n")
+            f.write(f"- Samples: `{summary['user_kpi_count']}`\n")
+        else:
+            f.write("- No USER_KPI data collected\n")
+
+        f.write(f"\n## Run Info\n\n")
+        f.write(f"- run_id: `{summary['run_id']}`\n")
+        f.write(f"- mode: `{summary['mode']}`\n")
+        f.write(f"- net_profile: `{net_profile}` ({NET_PROFILES.get(net_profile, {}).get('description', '')})\n")
+        f.write(f"- total: `{summary['total_cases']}`, ok: `{summary['ok_cases']}`, "
+                f"joined: `{summary['joined_cases']}`, has_audio: `{summary['has_audio_cases']}`\n\n")
+
+        f.write("## Per-Case Detail\n\n")
+        f.write("| # | case_id | tier | ok | joined | audio | USER_KPI | elapsed |\n")
+        f.write("|---|---------|------|----|--------|-------|----------|---------|\n")
+        for i, c in enumerate(summary.get("cases", [])):
+            ok_s = "✅" if c.get("ok") else "❌"
+            j_s = "✅" if c.get("joined") else "❌"
+            a_s = "✅" if c.get("has_reply_audio") else "❌"
+            kpi = f"{c['user_kpi_ms']}ms" if c.get("user_kpi_ms") else "—"
+            elapsed = f"{c.get('elapsed_s', 0):.0f}s"
+            f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | "
+                    f"{ok_s} | {j_s} | {a_s} | {kpi} | {elapsed} |\n")
+
+        # Errors
+        errors = [c for c in summary.get("cases", []) if c.get("error")]
+        if errors:
+            f.write("\n## Errors\n\n")
+            for c in errors:
+                f.write(f"- `{c['case_id']}`: {c['error']}\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

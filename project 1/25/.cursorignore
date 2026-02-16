@@ -1,0 +1,12 @@
+# Ignore large output directories (WAV files) to prevent
+# Cursor fileWatcher CPU spike → SSH connection drops
+output/
+output/**
+*.wav
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary test artifacts
+/tmp/

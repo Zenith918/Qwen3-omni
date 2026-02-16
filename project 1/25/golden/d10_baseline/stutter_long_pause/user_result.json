@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "room": "voice-agent-test-stutter_long_pause-071946",
+  "wav": "/workspace/project 1/25/output/autortc_cases/stutter_long_pause.wav",
+  "frame_ms": 20,
+  "realtime": 1,
+  "t_user_send_start": 1771227148.626002,
+  "t_user_send_end": 1771227158.1513507,
+  "audio_samples_48k": 418560,
+  "audio_duration_s": 8.72,
+  "probe_ready_received": true,
+  "agent_ready_received": true
+}

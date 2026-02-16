@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "room": "voice-agent-test-interrupt_twice-071946",
+  "wav": "/workspace/project 1/25/output/day2_reply.wav",
+  "frame_ms": 20,
+  "realtime": 1,
+  "t_user_send_start": 1771226684.7499783,
+  "t_user_send_end": 1771226688.195297,
+  "audio_samples_48k": 126720,
+  "audio_duration_s": 2.64,
+  "probe_ready_received": true,
+  "agent_ready_received": true
+}
