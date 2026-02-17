@@ -1,6 +1,6 @@
 {
   "snapshot": "POPULATED_FROM_SETTINGS",
-  "install": "pip install numpy requests livekit livekit-api playwright && playwright install chromium && playwright install-deps chromium && apt-get update && apt-get install -y openssh-client && mkdir -p ~/.ssh && echo \"$GPU_SSH_KEY\" > ~/.ssh/gpu_key && chmod 600 ~/.ssh/gpu_key && echo 'Host gpu\n  HostName 203.57.40.185\n  Port 10074\n  User root\n  IdentityFile ~/.ssh/gpu_key\n  StrictHostKeyChecking no' > ~/.ssh/config",
+  "install": "pip install numpy requests livekit livekit-api playwright && python3 -m playwright install chromium && apt-get update -qq && apt-get install -y -qq openssh-client && bash \"project 1/25/.cursor/setup_ssh.sh\"",
   "start": "",
   "terminals": []
 }
