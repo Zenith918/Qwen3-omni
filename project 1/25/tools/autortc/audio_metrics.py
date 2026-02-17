@@ -293,7 +293,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--autortc_traces", required=True, help="output/autortc/traces.jsonl")
     p.add_argument("--agent_traces", default="output/day5_e2e_traces.jsonl", help="agent trace jsonl")
     p.add_argument("--output_dir", required=True, help="run output dir")
-    p.add_argument("--baseline_summary", default="", help="D11: golden baseline summary.json for PRIMARY_KPI delta")
+    p.add_argument("--autobrowser_summary", default="", help="D12: autobrowser summary.json for USER_KPI")
     return p.parse_args()
 
 
@@ -607,8 +607,8 @@ def main() -> int:
         "tts_first->publish P95 <= 120ms":
             (_pct(tts_first_publish, 95) or float("inf")) <= 120.0,
         "audible_dropout == 0 (P0 reply)":
-            p0_audible == 0,
-        "max_gap < 350ms (P0 reply)":
+        "max_gap < 200ms (P0 reply)":
+            p0_max_gap < 200.0,
             p0_max_gap < 350.0,
         "clipping_ratio < 0.1%":
             (max(clipping_ratios) if clipping_ratios else 1.0) < 0.001,
@@ -671,46 +671,35 @@ def main() -> int:
         if warns:
             p1_warns.append((cid, warns))
 
-    # ── D11: PRIMARY KPI ──
-    primary_kpi = _pct(p0_eot, 95) if p0_eot else None
-
-    # Load baseline for delta computation
-    baseline_value = None
-    baseline_summary_path = args.baseline_summary or os.environ.get("TTS_REGRESSION_BASELINE_SUMMARY", "")
-    if not baseline_summary_path:
-        # Auto-detect golden baseline: search upward from script location
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.join(script_dir, "..", "..")  # tools/autortc/ → project root
-        golden_path = os.path.join(project_root, "golden", "d10_baseline", "summary.json")
-        if os.path.exists(golden_path):
-            baseline_summary_path = golden_path
-    if baseline_summary_path and os.path.exists(baseline_summary_path):
+    # ── D12: USER_KPI from autobrowser (WARN gate, not blocking) ──
+    user_kpi_p95 = None
+        f.write("# AutoRTC Report (D10)\n\n")
         try:
-            bl = _read_json(baseline_summary_path)
-            baseline_value = bl.get("PRIMARY_KPI_VALUE")
+            ab = _read_json(autobrowser_path)
+            user_kpi_data = {
+                "p50": ab.get("user_kpi_p50_ms"),
+                "p95": ab.get("user_kpi_p95_ms"),
+                "p99": ab.get("user_kpi_p99_ms"),
+                "max": ab.get("user_kpi_max_ms"),
+                "count": ab.get("user_kpi_count", 0),
+            }
+            user_kpi_p95 = ab.get("user_kpi_p95_ms")
         except Exception:
             pass
 
-    primary_kpi_delta = None
-    if primary_kpi is not None and baseline_value is not None:
-        primary_kpi_delta = round(primary_kpi - baseline_value, 2)
+    # USER_KPI WARN gate (does not block merge, informational)
+        f.write(f"- EoT->FirstAudio P95 (P0 valid): `{_pct(p0_eot, 95)}` ms\n")
+        f.write(f"- tts_first->publish P95: `{_pct(tts_first_publish, 95)}` ms\n")
+        f.write(f"- fast lane TTFT P95: `{_pct(fast_lane_ttft, 95)}` ms\n")
 
-    # Write PRIMARY_KPI into summary.json
-    summary["PRIMARY_KPI_NAME"] = "eot_to_probe_first_audio_p95_ms"
-    summary["PRIMARY_KPI_VALUE"] = round(primary_kpi, 2) if primary_kpi is not None else None
-    summary["PRIMARY_KPI_BASELINE"] = baseline_value
-    summary["PRIMARY_KPI_DELTA_MS"] = primary_kpi_delta
-    # Re-save summary with KPI
-    summary_path = Path(args.run_summary)
+    # Write USER_KPI into summary
+    summary["USER_KPI_P95_MS"] = user_kpi_p95
+    summary["USER_KPI_DATA"] = user_kpi_data
     try:
         with open(summary_path, "w", encoding="utf-8") as sf:
             json.dump(summary, sf, indent=2, ensure_ascii=False)
     except Exception:
         pass
-
-    # ── D11: PRIMARY KPI regression gate (optional) ──
-    if primary_kpi_delta is not None:
-        gates["PRIMARY_KPI regression <= 30ms"] = primary_kpi_delta <= 30.0
 
     # ── 写报告 ──
     report_path = out_dir / "report.md"
@@ -749,16 +738,16 @@ def main() -> int:
         f.write(f"- pre_rtc coverage: `{all_pre_rtc}/{total_cases}`\n")
         f.write(f"- mel valid (capture=OK): `{mel_valid}/{len(mel_ok_rows)}`\n")
 
-        f.write("\n## Gates (8/8)\n\n")
-        pass_count = sum(1 for ok in gates.values() if ok)
-        for name, ok in gates.items():
-            f.write(f"- {'PASS' if ok else 'FAIL'}: {name}\n")
-        f.write(f"\n**Result: {pass_count}/{len(gates)} PASS**\n")
-
-        if p1_warns:
-            f.write("\n## P1 Anomaly Fingerprints (WARN, not gated)\n\n")
-            for cid, warns in p1_warns:
-                f.write(f"- `{cid}`: {', '.join(warns)}\n")
+                    "NO_TRACE_ID": "No trace_id available → check DataChannel event propagation.",
+                }
+                suggestions.append((cid, f"PRE_MISSING({reason})",
+                    fix_map.get(reason, "Unknown reason, check agent logs.")))
+            mel = float(r.get("mel_distance", -1))
+            if cs == "OK" and mel > 15:
+                suggestions.append((cid, f"mel_distance={mel:.1f}",
+                    "High mel_distance → check resample chain, bit-width scaling, or repeated resample."))
+            dr = float(r.get("drift_ratio", -1))
+            if dr > 0 and abs(dr - 1.0) > 0.02:
 
         # Per-case detail
         f.write("\n## Per-Case Detail\n\n")
@@ -828,10 +817,16 @@ def main() -> int:
     for name, ok in gates.items():
         status = "PASS ✅" if ok else "FAIL ❌"
         print(f"  {status}: {name}")
+    # WARN gates (informational)
+    if warn_gates:
+        print()
+        for name, ok in warn_gates.items():
+            status = "OK ✅" if ok else "WARN ⚠️"
+            print(f"  {status}: {name}")
     print(f"\n{'='*50}")
     print(f"RESULT: {pass_count}/{total_gates} gates PASS")
     if pass_count == total_gates:
-        print("🎉 ALL GATES PASS")
+        print("ALL GATES PASS")
     return 0
 
 

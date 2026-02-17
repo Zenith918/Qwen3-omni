@@ -166,46 +166,46 @@
 
   <script>
     let room = null;
-    window.room = null;  // D12: expose for Playwright access
     let agentAudioEl = null;
 
-    // ── D12 AutoBrowser: URL 参数解析 ──────────────────────
+    // ── D12: URL params for auto mode ──
     const _params = new URLSearchParams(window.location.search);
-    const AUTO_MODE       = _params.get('auto') === '1';
-    const PARAM_TRACE_ID  = _params.get('trace_id') || '';
-    const PARAM_CASE_ID   = _params.get('case_id') || '';
-    const PARAM_TURN_ID   = _params.get('turn_id') || '0';
-    const PARAM_ROOM      = _params.get('room') || '';
-    const PARAM_IDENTITY  = _params.get('identity') || '';
-    const PARAM_TOKEN     = _params.get('lk_token') || '';
-    const PARAM_LK_URL    = _params.get('lk_url') || '';
-    const PARAM_CALLBACK  = _params.get('callback_url') || '';
-    const AUTO_DISCONNECT_S = parseInt(_params.get('auto_disconnect_s') || '30', 10);
+    const AUTO_MODE = _params.get('auto') === '1';
+    const PARAM_TOKEN = _params.get('lk_token') || '';
+    const PARAM_LK_URL = _params.get('lk_url') || '';
+    const PARAM_ROOM = _params.get('room') || '';
+    const PARAM_IDENTITY = _params.get('identity') || '';
+    const PARAM_TRACE_ID = _params.get('trace_id') || '';
+    const PARAM_CASE_ID = _params.get('case_id') || '';
+    const PARAM_TURN_ID = _params.get('turn_id') || '0';
+    const AUTO_DISCONNECT_S = parseInt(_params.get('auto_disconnect_s') || '0', 10);
 
-    // ── D12: Exposed state for Playwright ──
-    window.__autobrowser_traces = [];
-    window.__autobrowser_done = false;
+    // ── D12: Globals exposed to Playwright ──
     window.__autobrowser_joined = false;
+    window.__autobrowser_done = false;
     window.__autobrowser_error = null;
-    window.__autobrowser_reply_audio_chunks = [];  // base64-encoded WebM chunks
-    window.__autobrowser_recording_blob = null;    // final Blob
+    window.__autobrowser_traces = [];
+    window.__autobrowser_recording_blob = null;
 
-    // ── Browser trace state ──────────────────────────────────
+    // ── D13: Browser-side instrumentation ──
     const browserTraces = [];
     let currentTrace = null;
     let audioContext = null;
     let micAnalyser = null;
     let agentAnalyser = null;
-    let agentAudioSource = null;
+    let agentPlayoutDetected = false;
     let speechDetected = false;
     let speechEndTimer = null;
-    let agentPlayoutDetected = false;
+    let micMonitorInterval = null;
+    let agentMonitorInterval = null;
     let mediaRecorder = null;
     let recordedChunks = [];
+    const SPEECH_THRESHOLD = 0.015;
+    const SILENCE_TIMEOUT_MS = 400;
 
-    const SPEECH_THRESHOLD   = 0.015;   // user mic energy threshold
-    const SILENCE_TIMEOUT_MS = 400;     // user silence → EoT
-    const PLAYOUT_THRESHOLD  = 0.008;   // agent playout energy threshold (lower = more sensitive)
+    // D13 P0-3: Playout detection resolution (ms)
+    const PLAYOUT_POLL_MS = parseInt(_params.get('playout_poll_ms') || '5', 10);
+    const MIC_POLL_MS = parseInt(_params.get('mic_poll_ms') || '10', 10);
 
     function startBrowserTrace() {
       currentTrace = {
@@ -217,57 +217,64 @@
         t_user_eot_browser: null,
         t_agent_track_first_frame_recv: null,
         t_browser_first_playout: null,
-        t_first_audio_playout: null,  // compat alias
+        t_first_audio_playout: null,
       };
       speechDetected = false;
-      agentPlayoutDetected = false;
     }
 
-    // D12: Callable from Playwright after mic mute.
-    // The mic-mute moment IS the user EoT (since fake audio just stopped).
-    // We reset traces and record t_user_eot_browser = now, then wait for
-    // the next agent playout to compute USER_KPI.
-    window.resetForMeasurement = function() {
-      browserTraces.length = 0;
-      window.__autobrowser_traces = [];
-      agentPlayoutDetected = false;
-      // Start fresh trace with EoT = now (mic just muted)
-      startBrowserTrace();
-      const eotNow = performance.now();
-      currentTrace.t_user_speech_start = eotNow - 100;  // nominal
-      currentTrace.t_user_speech_end = eotNow;
-      currentTrace.t_user_eot_browser = eotNow;
-      speechDetected = false;
-      console.log('[autobrowser:event] Trace reset: EoT set to mic-mute time');
+    // D13 P0-1: finalizeTrace keeps raw, computes clamped, detects talk-over
+    function finalizeTrace() {
+      if (!currentTrace) return;
+      // Allow finalization even if only one of playout/eot exists
+      // (we record what we have and mark missing fields)
+      const hasPlayout = currentTrace.t_browser_first_playout != null;
+      const hasEot = currentTrace.t_user_speech_end != null;
+      if (!hasPlayout && !hasEot) return;
 
-      // If agent track is already subscribed, its next audio frame is the playout.
-      // Use a short delay to let the system settle, then check for playout.
-      if (agentAudioEl || agentAnalyser) {
-        // Agent track already exists — schedule playout detection
-        setTimeout(() => {
-          if (currentTrace && !currentTrace.t_browser_first_playout) {
-            currentTrace.t_browser_first_playout = performance.now();
-            currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
-            console.log('[autobrowser:event] Post-mute playout detected (agent already connected)');
-            finalizeTrace();
-          }
-        }, 200);  // 200ms: accounts for any buffered agent audio arriving
+      let raw_kpi_ms = null;
+      let user_kpi_clamped = null;
+      let is_talk_over = false;
+
+      if (hasPlayout && hasEot) {
+        const raw_delta = currentTrace.t_browser_first_playout - currentTrace.t_user_speech_end;
+        raw_kpi_ms = Math.round(raw_delta);
+        user_kpi_clamped = Math.max(0, raw_kpi_ms);
+        is_talk_over = raw_kpi_ms < 0;
       }
-    };
 
-    // ── Mic energy monitor (User EoT detection) ────────────
-    // NOTE: uses setInterval (not requestAnimationFrame) for headless Chromium compat
-    let micMonitorInterval = null;
+      const label = is_talk_over
+        ? `TALK-OVER raw=${raw_kpi_ms}ms`
+        : `USER_KPI raw=${raw_kpi_ms}ms clamped=${user_kpi_clamped}ms`;
+      log(label, is_talk_over ? 'event' : 'success');
+
+      const traceData = {
+        ...currentTrace,
+        user_kpi_raw_ms: raw_kpi_ms,
+        user_kpi_ms: user_kpi_clamped,
+        is_talk_over,
+        eot_to_first_audio_ms: user_kpi_clamped,
+        playout_resolution_ms: PLAYOUT_POLL_MS,
+        mic_resolution_ms: MIC_POLL_MS,
+        wall_time: Date.now(),
+      };
+      browserTraces.push(traceData);
+      window.__autobrowser_traces = browserTraces;
+      updateStats();
+
+      currentTrace = null;
+      startBrowserTrace();
+    }
+
+    // D13 P0-3: Mic monitoring at configurable resolution
     function monitorMic(stream) {
-      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioContext.state === 'suspended') audioContext.resume();
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!audioContext && Ctx) audioContext = new Ctx();
       const source = audioContext.createMediaStreamSource(stream);
       micAnalyser = audioContext.createAnalyser();
       micAnalyser.fftSize = 512;
       source.connect(micAnalyser);
       const buf = new Float32Array(micAnalyser.fftSize);
 
-      if (micMonitorInterval) clearInterval(micMonitorInterval);
       micMonitorInterval = setInterval(() => {
         if (!micAnalyser) return;
         micAnalyser.getFloatTimeDomainData(buf);
@@ -289,9 +296,9 @@
             speechEndTimer = setTimeout(() => {
               if (currentTrace && !currentTrace.t_user_speech_end) {
                 currentTrace.t_user_speech_end = performance.now();
-                currentTrace.t_user_eot_browser = performance.now();
-                log(`📍 EoT: ${(currentTrace.t_user_speech_end - currentTrace.t_user_speech_start).toFixed(0)}ms speech`, 'event');
-                // D12: try finalize in case playout already detected
+                currentTrace.t_user_eot_browser = currentTrace.t_user_speech_end;
+                log(`EoT: ${(currentTrace.t_user_speech_end - currentTrace.t_user_speech_start).toFixed(0)}ms speech`, 'event');
+                // D13: try finalize (playout may already exist = talk-over)
                 finalizeTrace();
               }
               speechDetected = false;
@@ -299,174 +306,136 @@
             }, SILENCE_TIMEOUT_MS);
           }
         }
-      }, 30);  // 30ms polling (~33Hz), reliable in headless
+      }, MIC_POLL_MS);
     }
 
-    // ── D12: Agent playout energy monitor (AnalyserNode on remote track) ──
-    // NOTE: uses setInterval for headless Chromium compatibility
-    let agentMonitorInterval = null;
-    function monitorAgentPlayout(mediaStream) {
-      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioContext.state === 'suspended') audioContext.resume();
-      agentAudioSource = audioContext.createMediaStreamSource(mediaStream);
-      agentAnalyser = audioContext.createAnalyser();
-      agentAnalyser.fftSize = 512;
-      agentAudioSource.connect(agentAnalyser);
-      // Also connect to destination so we hear it (no-op in headless but needed for real browser)
-      agentAudioSource.connect(audioContext.destination);
-      const buf = new Float32Array(agentAnalyser.fftSize);
-
-      if (agentMonitorInterval) clearInterval(agentMonitorInterval);
-      agentMonitorInterval = setInterval(() => {
-        if (!agentAnalyser) return;
-        agentAnalyser.getFloatTimeDomainData(buf);
-        let rms = 0;
-        for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
-        rms = Math.sqrt(rms / buf.length);
-
-        if (rms > PLAYOUT_THRESHOLD && !agentPlayoutDetected) {
-          agentPlayoutDetected = true;
-          onAgentFirstPlayout();
-        }
-      }, 30);  // 30ms polling, headless-safe
-    }
-
-    // ── D12: Called when agent playout energy first detected ──
-    function onAgentFirstPlayout() {
-      if (!currentTrace) return;
-      const now = performance.now();
-      if (!currentTrace.t_browser_first_playout) {
-        currentTrace.t_browser_first_playout = now;
-        currentTrace.t_first_audio_playout = now;  // compat
-        log(`🔊 Agent first playout detected (energy)`, 'audio');
-      }
-      finalizeTrace();
-    }
-
-    // ── D5 compat: fallback for agent audio start via track/ActiveSpeakers events ──
-    function onAgentAudioStart() {
-      if (!currentTrace) return;
-      const now = performance.now();
-      // Only use as fallback if energy detection hasn't fired yet
-      if (!currentTrace.t_browser_first_playout) {
-        currentTrace.t_browser_first_playout = now;
-        currentTrace.t_first_audio_playout = now;
-        log(`🔊 Agent audio start (fallback)`, 'audio');
-      }
-      finalizeTrace();
-    }
-
-    // D12: Fallback finalization when TrackSubscribed fires
-    // In headless Chromium, AnalyserNode energy detection may not work,
-    // so we use track arrival + delay as a playout proxy.
-    function onAgentTrackArrived() {
-      if (!currentTrace || currentTrace.t_browser_first_playout) return;
-      // Wait 500ms to let energy detection win if it can; otherwise use fallback
-      setTimeout(() => {
-        if (currentTrace && !currentTrace.t_browser_first_playout) {
-          currentTrace.t_browser_first_playout = performance.now();
-          currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
-          log(`🔊 Agent playout (track-arrival fallback)`, 'audio');
-          finalizeTrace();
-        }
-      }, 500);
-    }
-
-    function finalizeTrace() {
-      if (!currentTrace) return;
-      if (!currentTrace.t_browser_first_playout) return;
-      if (!currentTrace.t_user_speech_end) return;
-
-      const raw_delta = currentTrace.t_browser_first_playout - currentTrace.t_user_speech_end;
-      // If agent responded before user finished (streaming), KPI = 0
-      const user_kpi_ms = Math.max(0, Math.round(raw_delta));
-      const raw_kpi_ms = Math.round(raw_delta);
-      log(`⚡ USER_KPI (EoT→Playout): ${user_kpi_ms}ms (raw=${raw_kpi_ms}ms)`, 'success');
-
-      const traceData = {
-        ...currentTrace,
-        user_kpi_ms,
-        user_kpi_raw_ms: raw_kpi_ms,
-        eot_to_first_audio_ms: user_kpi_ms,
-        wall_time: Date.now(),
-      };
-      browserTraces.push(traceData);
-      window.__autobrowser_traces = browserTraces;
-      updateStats();
-
-      // Reset for next turn
-      currentTrace = null;
-      startBrowserTrace();
-    }
-
-    function updateStats() {
-      const el = document.getElementById('stats');
-      if (!el || browserTraces.length === 0) return;
-      const vals = browserTraces.map(t => t.user_kpi_ms).filter(v => v > 0).sort((a,b) => a-b);
-      if (vals.length === 0) return;
-      const p50 = vals[Math.floor(vals.length * 0.5)];
-      const p95 = vals[Math.floor(vals.length * 0.95)];
-      el.textContent = `📊 USER_KPI: P50=${p50}ms P95=${p95}ms (n=${vals.length})`;
-    }
-
-    // ── D12: Audio recording (record agent's remote audio stream) ──
-    function startRecording(mediaStream) {
-      recordedChunks = [];
+    // D13 P0-3: Agent playout detection at high resolution
+    function monitorAgentPlayout(audioEl) {
+      if (!audioEl || !audioEl.srcObject) return;
       try {
-        // Try opus first, then fallback
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : 'audio/webm';
-        mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!audioContext && Ctx) audioContext = new Ctx();
+        const source = audioContext.createMediaStreamSource(audioEl.srcObject);
+        agentAnalyser = audioContext.createAnalyser();
+        agentAnalyser.fftSize = 256;  // smaller FFT for faster processing
+        source.connect(agentAnalyser);
+        const buf = new Float32Array(agentAnalyser.fftSize);
+        const PLAYOUT_THRESHOLD = 0.005;
+
+        agentMonitorInterval = setInterval(() => {
+          if (!agentAnalyser || agentPlayoutDetected) return;
+          agentAnalyser.getFloatTimeDomainData(buf);
+          let rms = 0;
+          for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+          rms = Math.sqrt(rms / buf.length);
+
+          if (rms > PLAYOUT_THRESHOLD) {
+            agentPlayoutDetected = true;
+            if (currentTrace && !currentTrace.t_browser_first_playout) {
+              currentTrace.t_browser_first_playout = performance.now();
+              currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
+              log(`Agent playout detected (energy=${rms.toFixed(4)}, res=${PLAYOUT_POLL_MS}ms)`, 'success');
+              // D13: try finalize (EoT may already exist or not yet)
+              finalizeTrace();
+            }
+          }
+        }, PLAYOUT_POLL_MS);
+
+        startRecording(audioEl.srcObject);
+      } catch (e) {
+        console.log('[autobrowser] monitorAgentPlayout error:', e);
+      }
+    }
+
+    function startRecording(stream) {
+      try {
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
         mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0) recordedChunks.push(e.data);
+          if (e.data && e.data.size > 0) recordedChunks.push(e.data);
         };
         mediaRecorder.onstop = () => {
-          const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
-          window.__autobrowser_recording_blob = blob;
-          log(`🎙️ Recording stopped: ${(blob.size / 1024).toFixed(1)}KB`, 'audio');
+          if (recordedChunks.length > 0) {
+            window.__autobrowser_recording_blob = new Blob(recordedChunks, { type: 'audio/webm' });
+          }
         };
-        mediaRecorder.start(1000); // chunk every 1s
-        log(`🎙️ Recording agent audio (${mimeType})`, 'audio');
-      } catch(e) {
-        log(`Recording start failed: ${e.message}`, 'error');
+        mediaRecorder.start(500);
+      } catch (e) {
+        console.log('[autobrowser] MediaRecorder error:', e);
       }
     }
 
     function stopRecording() {
       if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
+        try { mediaRecorder.stop(); } catch(e) {}
       }
     }
 
-    // ── Logging / UI ──────────────────────────────────────────
+    function onAgentAudioStart() {
+      if (currentTrace && !currentTrace.t_first_audio_playout) {
+        currentTrace.t_first_audio_playout = performance.now();
+        currentTrace.t_browser_first_playout = currentTrace.t_first_audio_playout;
+        log(`Agent audio start (ActiveSpeakers/TrackSubscribed)`, 'success');
+        finalizeTrace();
+      }
+    }
+
+    // D12 legacy fallback — kept but NOT called by default in D13.
+    // D13 uses padded WAV so monitorMic naturally detects EoT.
+    window.resetForMeasurement = function() {
+      browserTraces.length = 0;
+      window.__autobrowser_traces = [];
+      agentPlayoutDetected = false;
+      startBrowserTrace();
+      const eotNow = performance.now();
+      currentTrace.t_user_speech_start = eotNow - 100;
+      currentTrace.t_user_speech_end = eotNow;
+      currentTrace.t_user_eot_browser = eotNow;
+      speechDetected = false;
+      console.log('[autobrowser:event] Trace reset (legacy fallback)');
+    };
+
+    function updateStats() {
+      const el = document.getElementById('stats');
+      if (!el || browserTraces.length === 0) return;
+      const rawVals = browserTraces.map(t => t.user_kpi_raw_ms).filter(v => v != null).sort((a,b) => a-b);
+      if (rawVals.length === 0) return;
+      const talkOvers = rawVals.filter(v => v < 0);
+      const turnTaking = rawVals.filter(v => v >= 0).sort((a,b) => a-b);
+      const p50 = turnTaking.length > 0 ? turnTaking[Math.floor(turnTaking.length * 0.5)] : 'N/A';
+      const p95 = turnTaking.length > 0 ? turnTaking[Math.floor(turnTaking.length * 0.95)] : 'N/A';
+      let txt = `KPI raw: P50=${p50}ms P95=${p95}ms (n=${rawVals.length})`;
+      if (talkOvers.length > 0) txt += ` | talk-over: ${talkOvers.length}`;
+      el.textContent = txt;
+    }
+
     function log(msg, type = 'info') {
       const logEl = document.getElementById('log');
-      if (!logEl) return;
+      if (!logEl) { console.log(`[log:${type}] ${msg}`); return; }
       const entry = document.createElement('div');
       entry.className = `log-entry ${type}`;
       entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       logEl.appendChild(entry);
       logEl.scrollTop = logEl.scrollHeight;
-      // Also console.log for Playwright capture
       console.log(`[autobrowser:${type}] ${msg}`);
     }
 
     function setStatus(text, cls) {
       const el = document.getElementById('status');
-      el.textContent = text;
-      el.className = `status ${cls}`;
+      if (el) { el.textContent = text; el.className = `status ${cls}`; }
     }
 
     function setVisualizer(state) {
       const el = document.getElementById('visualizer');
+      if (!el) return;
       el.className = 'visualizer' + (state ? ' ' + state : '');
       const textMap = {
         '': '🎤 等待连接',
         'active': '🎤 正在聆听...',
         'speaking': '🔊 正在回复...',
       };
-      el.querySelector('.visualizer-text').textContent = textMap[state || ''] || '🎤';
+      const span = el.querySelector('.visualizer-text');
+      if (span) span.textContent = textMap[state || ''] || '🎤';
     }
 
     async function unlockPlayback() {
@@ -474,115 +443,82 @@
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (Ctx) {
           if (!audioContext) audioContext = new Ctx();
-          if (audioContext.state === 'suspended') {
-            await audioContext.resume();
-          }
+          if (audioContext.state === 'suspended') await audioContext.resume();
         }
-      } catch (e) {
-        log(`AudioContext resume failed: ${e.message || e}`, 'error');
-      }
+      } catch (e) { log(`AudioContext resume: ${e}`, 'error'); }
       try {
-        if (agentAudioEl) {
-          agentAudioEl.muted = false;
-          agentAudioEl.volume = 1.0;
-          await agentAudioEl.play();
-        }
-      } catch (e) {
-        log(`Audio unlock play failed: ${e.message || e}`, 'error');
-      }
+        if (agentAudioEl) { agentAudioEl.muted = false; agentAudioEl.volume = 1.0; await agentAudioEl.play(); }
+      } catch (e) { log(`Audio unlock: ${e}`, 'error'); }
     }
 
-    // ── 内嵌 Token (7天有效, 到期后在服务器上重新生成) ──
     const EMBEDDED_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiVXNlciIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidm9pY2UtYWdlbnQtdGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9LCJzdWIiOiJ2b2ljZS11c2VyLTEiLCJpc3MiOiJBUEk3ZmozNXdHTHVtdGMiLCJuYmYiOjE3NzA5NDc3MzksImV4cCI6MTc3MTU1MjUzOX0.RhGZpVOEAEiVa4mP6A4-WQD4e6ybjK6w75oB-KePDG8';
     const LIVEKIT_WS = 'wss://renshenghehuoren-mpdsjfwe.livekit.cloud';
 
     async function getToken() {
-      // D12: Auto mode — use URL params directly
-      if (PARAM_TOKEN && PARAM_LK_URL) {
-        log(`使用 URL 参数 Token (room=${PARAM_ROOM})`, 'info');
-        return { token: PARAM_TOKEN, url: PARAM_LK_URL };
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('lk_token')) {
+        const url = params.get('lk_url') || LIVEKIT_WS;
+        log(`Using URL token, url=${url}`, 'info');
+        return { token: params.get('lk_token'), url };
       }
-
-      // 1. URL 参数 (legacy compat)
-      if (_params.get('lk_token')) {
-        log('使用 URL 参数中的 Token', 'info');
-        return { token: _params.get('lk_token'), url: LIVEKIT_WS };
-      }
-
-      // 2. 尝试 Token API（如果 Token Server 可达）
-      const tokenParams = new URLSearchParams();
-      if (PARAM_ROOM) tokenParams.set('room', PARAM_ROOM);
-      if (PARAM_IDENTITY) tokenParams.set('identity', PARAM_IDENTITY);
-      const qs = tokenParams.toString() ? `?${tokenParams.toString()}` : '';
-
       for (const base of [window.location.origin, '']) {
         try {
-          const resp = await fetch(`${base}/api/token${qs}`);
+          const resp = await fetch(`${base}/api/token`);
           if (resp.ok) {
             const data = await resp.json();
-            log(`Token API: room=${data.room}, TTL=${data.ttl}s`, 'success');
+            log(`Token API: room=${data.room}`, 'success');
             return { token: data.token, url: data.url };
           }
-        } catch (e) { /* try next */ }
+        } catch (e) {}
       }
-
-      // 3. 内嵌 Token（最终 fallback，7天有效）
-      log('使用内嵌 Token (7天有效)', 'info');
+      log('Using embedded token', 'info');
       return { token: EMBEDDED_TOKEN, url: LIVEKIT_WS };
     }
 
     async function connect() {
       try {
         const btn = document.getElementById('connectBtn');
-        btn.disabled = true;
-        setStatus('正在连接...', 'connecting');
+        if (btn) btn.disabled = true;
+        setStatus('Connecting...', 'connecting');
         await unlockPlayback();
 
         const { token, url } = await getToken();
-        log(`连接到 ${url}`, 'event');
+        log(`Connecting to ${url}`, 'event');
 
         room = new LivekitClient.Room({
           adaptiveStream: true,
           dynacast: true,
-          audioCaptureDefaults: {
-            autoGainControl: true,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
+          audioCaptureDefaults: { autoGainControl: true, echoCancellation: true, noiseSuppression: true },
         });
-        window.room = room;  // D12: expose for Playwright
+        window.room = room;
 
-        // 事件监听
         room.on(LivekitClient.RoomEvent.Connected, () => {
-          log('✅ 已连接到房间', 'success');
-          setStatus('已连接', 'connected');
+          log('Connected to room', 'success');
+          setStatus('Connected', 'connected');
           setVisualizer('active');
-          document.getElementById('disconnectBtn').disabled = false;
+          const db = document.getElementById('disconnectBtn');
+          if (db) db.disabled = false;
           window.__autobrowser_joined = true;
         });
 
         room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
-          log(`断开连接: ${reason || 'unknown'}`, 'event');
-          setStatus('已断开', 'disconnected');
+          log(`Disconnected: ${reason || 'unknown'}`, 'event');
+          setStatus('Disconnected', 'disconnected');
           setVisualizer('');
-          btn.disabled = false;
-          document.getElementById('disconnectBtn').disabled = true;
+          if (btn) btn.disabled = false;
+          const db = document.getElementById('disconnectBtn');
+          if (db) db.disabled = true;
           stopRecording();
+          window.__autobrowser_done = true;
         });
 
         room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) => {
-          log(`参与者加入: ${p.identity}`, 'event');
+          log(`Participant joined: ${p.identity}`, 'event');
         });
 
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
-          log(`收到 ${participant.identity} 的 ${track.kind} track`, 'audio');
+          log(`Track subscribed: ${participant.identity} ${track.kind}`, 'audio');
           if (track.kind === 'audio') {
-            // D12: Record t_agent_track_first_frame_recv
-            if (currentTrace && !currentTrace.t_agent_track_first_frame_recv) {
-              currentTrace.t_agent_track_first_frame_recv = performance.now();
-              log(`📍 Agent track first frame recv: ${currentTrace.t_agent_track_first_frame_recv.toFixed(0)}ms`, 'event');
-            }
-
             if (agentAudioEl) { agentAudioEl.remove(); }
             agentAudioEl = track.attach();
             agentAudioEl.style.display = 'none';
@@ -591,23 +527,27 @@
             agentAudioEl.muted = false;
             agentAudioEl.volume = 1.0;
             document.body.appendChild(agentAudioEl);
-            unlockPlayback().catch(e => log(`Audio play error: ${e}`, 'error'));
-            log('🔊 Agent 音频已连接', 'success');
+            unlockPlayback().catch(() => {});
+            log('Agent audio attached', 'success');
             setVisualizer('speaking');
 
-            // D12: Start energy-based playout detection on remote track
-            try {
-              const remoteStream = new MediaStream([track.mediaStreamTrack]);
-              monitorAgentPlayout(remoteStream);
-              // D12: Start recording agent audio
-              startRecording(remoteStream);
-              // D12: Fallback finalization if EoT already detected
-              onAgentTrackArrived();
-            } catch(e) {
-              log(`Agent playout monitor failed: ${e.message}`, 'error');
-              // Fallback to old method
-              onAgentAudioStart();
+            // Record timestamp for first frame
+            if (currentTrace && !currentTrace.t_agent_track_first_frame_recv) {
+              currentTrace.t_agent_track_first_frame_recv = performance.now();
             }
+
+            // Start agent playout monitoring
+            monitorAgentPlayout(agentAudioEl);
+
+            // Fallback: if playout not detected in 500ms, use track subscribe time
+            setTimeout(() => {
+              if (currentTrace && !currentTrace.t_browser_first_playout) {
+                currentTrace.t_browser_first_playout = performance.now();
+                currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
+                log('Agent playout (fallback: track subscribed + 500ms)', 'info');
+                finalizeTrace();
+              }
+            }, 500);
           }
         });
 
@@ -618,53 +558,43 @@
           }
         });
 
-        // 连接
-        await room.connect(url, token);
-        log('正在发布麦克风...', 'info');
-        await room.localParticipant.setMicrophoneEnabled(true);
-        log('🎤 麦克风已开启', 'success');
+        room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const agentSpeaking = speakers.some(s => s.identity !== (PARAM_IDENTITY || 'voice-user-1'));
+          setVisualizer(agentSpeaking ? 'speaking' : 'active');
+          if (agentSpeaking) onAgentAudioStart();
+        });
 
-        // 监控麦克风能量（浏览器端 EoT 检测）
+        await room.connect(url, token);
+        log('Publishing mic...', 'info');
+        await room.localParticipant.setMicrophoneEnabled(true);
+        log('Mic enabled', 'success');
+
         try {
           const micTrack = room.localParticipant.getTrackPublication(LivekitClient.Track.Source.Microphone);
           if (micTrack && micTrack.track) {
             const stream = new MediaStream([micTrack.track.mediaStreamTrack]);
             monitorMic(stream);
-            log('📊 浏览器端延迟监控已启动', 'info');
+            log('Mic monitor started', 'info');
           }
         } catch(e) { log(`Mic monitor: ${e.message}`, 'info'); }
 
-        // 监听 ActiveSpeakers 作为首音 fallback
-        room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
-          const localIdentity = room.localParticipant.identity;
-          const agentSpeaking = speakers.some(s => s.identity !== localIdentity);
-          setVisualizer(agentSpeaking ? 'speaking' : 'active');
-          if (agentSpeaking) onAgentAudioStart();
-        });
-
         startBrowserTrace();
 
-        // D12: Auto-disconnect timer for automation
+        // D12 auto-disconnect timer
         if (AUTO_MODE && AUTO_DISCONNECT_S > 0) {
-          log(`⏱️ Auto mode: will disconnect in ${AUTO_DISCONNECT_S}s`, 'info');
           setTimeout(async () => {
-            log('⏱️ Auto disconnect triggered', 'event');
+            log(`Auto-disconnect after ${AUTO_DISCONNECT_S}s`, 'event');
             stopRecording();
-            // Allow recording to finalize
-            await new Promise(r => setTimeout(r, 500));
-            // Send callback
-            await sendCallback();
-            window.__autobrowser_done = true;
             await disconnect();
           }, AUTO_DISCONNECT_S * 1000);
         }
 
       } catch (e) {
-        log(`连接失败: ${e.message}`, 'error');
-        setStatus('连接失败', 'error');
-        document.getElementById('connectBtn').disabled = false;
+        log(`Connect failed: ${e.message}`, 'error');
+        setStatus('Error', 'error');
         window.__autobrowser_error = e.message;
-        window.__autobrowser_done = true;
+        const btn = document.getElementById('connectBtn');
+        if (btn) btn.disabled = false;
       }
     }
 
@@ -675,48 +605,22 @@
         room = null;
         window.room = null;
       }
-      if (agentAudioEl) {
-        agentAudioEl.remove();
-        agentAudioEl = null;
-      }
-      // Clean up audio nodes
-      if (agentAnalyser) { agentAnalyser = null; }
-      if (agentAudioSource) { agentAudioSource = null; }
-      setStatus('已断开', 'disconnected');
+      if (agentAudioEl) { agentAudioEl.remove(); agentAudioEl = null; }
+      if (micMonitorInterval) { clearInterval(micMonitorInterval); micMonitorInterval = null; }
+      if (agentMonitorInterval) { clearInterval(agentMonitorInterval); agentMonitorInterval = null; }
+      setStatus('Disconnected', 'disconnected');
       setVisualizer('');
-      document.getElementById('connectBtn').disabled = false;
-      document.getElementById('disconnectBtn').disabled = true;
-      log('已断开连接', 'event');
+      const cb = document.getElementById('connectBtn');
+      if (cb) cb.disabled = false;
+      const db = document.getElementById('disconnectBtn');
+      if (db) db.disabled = true;
+      log('Disconnected', 'event');
     }
 
-    // ── D12: HTTP callback to send browser_trace back to harness ──
-    async function sendCallback() {
-      if (!PARAM_CALLBACK) return;
-      const payload = {
-        trace_id: PARAM_TRACE_ID,
-        case_id: PARAM_CASE_ID,
-        turn_id: PARAM_TURN_ID,
-        traces: browserTraces,
-        has_recording: !!window.__autobrowser_recording_blob,
-        recording_size: window.__autobrowser_recording_blob?.size || 0,
-      };
-      try {
-        await fetch(PARAM_CALLBACK, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        log(`📤 Callback sent to ${PARAM_CALLBACK}`, 'success');
-      } catch(e) {
-        log(`Callback failed: ${e.message}`, 'error');
-      }
-    }
-
-    // ── D12: Auto-connect on page load if auto=1 ──
-    if (AUTO_MODE) {
-      window.addEventListener('load', () => {
-        log(`🤖 AutoBrowser mode: trace=${PARAM_TRACE_ID} case=${PARAM_CASE_ID}`, 'event');
-        setTimeout(() => connect(), 500);
+    // D12: Auto-connect if auto mode
+    if (AUTO_MODE && PARAM_TOKEN) {
+      window.addEventListener('DOMContentLoaded', () => {
+        setTimeout(() => connect(), 300);
       });
     }
   </script>

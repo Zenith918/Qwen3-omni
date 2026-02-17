@@ -113,12 +113,17 @@ def _clear_netem(interface: str):
         pass
 
 
-def _convert_wav_for_chromium(src_wav: str, dst_wav: str) -> str:
+SILENCE_PAD_S = 10  # seconds of silence appended after speech
+
+
+def _prepare_chromium_wav(src_wav: str, dst_wav: str, silence_pad_s: float = SILENCE_PAD_S) -> str:
     """
-    Chromium's --use-file-for-fake-audio-capture requires:
-    - WAV format, PCM 16-bit
-    - Sample rate that Chromium accepts (ideally 48000 or 16000)
-    Returns path to converted file.
+    D13: Generate chromium_input.wav = original_speech + long_silence (48k/16bit).
+
+    Chromium's --use-file-for-fake-audio-capture loops the file, so we append
+    enough silence that the recording window ends *within* the silence portion,
+    preventing loop-back. This lets monitorMic naturally detect EoT via energy
+    drop without needing programmatic mic mute.
     """
     try:
         import numpy as np
@@ -130,7 +135,6 @@ def _convert_wav_for_chromium(src_wav: str, dst_wav: str) -> str:
         if n_channels > 1:
             audio = audio.reshape(-1, n_channels)[:, 0]
 
-        # Resample to 48000 for Chromium
         target_sr = 48000
         if sr != target_sr:
             n_dst = int(round(len(audio) * target_sr / sr))
@@ -140,15 +144,22 @@ def _convert_wav_for_chromium(src_wav: str, dst_wav: str) -> str:
                             -32768, 32767).astype(np.int16)
             sr = target_sr
 
+        # Append silence so Chromium won't loop back into speech
+        silence_samples = int(silence_pad_s * sr)
+        padded = np.concatenate([audio, np.zeros(silence_samples, dtype=np.int16)])
+
         ensure_parent(dst_wav)
         with wave.open(dst_wav, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sr)
-            wf.writeframes(audio.tobytes())
+            wf.writeframes(padded.tobytes())
+
+        speech_dur = len(audio) / sr
+        total_dur = len(padded) / sr
         return dst_wav
     except Exception as e:
-        print(f"  WARN: WAV conversion failed: {e}, using original")
+        print(f"  WARN: WAV preparation failed: {e}, using original")
         return src_wav
 
 
@@ -205,7 +216,6 @@ async def _run_browser_case(
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-gpu",
                 "--no-sandbox",
-                # Allow autoplay
                 "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
             ],
         )
@@ -233,27 +243,11 @@ async def _run_browser_case(
                 result["error"] = f"Join timeout: {e}"
                 return result
 
-            # D12: Mute mic after wav duration to simulate user stopping speech.
-            # Chromium fake audio capture loops the file, so we must explicitly
-            # mute to create the silence gap that triggers EoT detection.
-            # We also RESET the browser trace so only post-mute EoT→playout
-            # is measured (avoiding spurious KPI=0 from early agent responses).
-            wav_dur = wav_duration_s(case_wav_48k) if case_wav_48k else 3.0
-            mute_delay = wav_dur + 2.0  # extra 2s for LiveKit join + first audio to start
-            await asyncio.sleep(mute_delay)
-            try:
-                await page.evaluate("""
-                    async () => {
-                        if (window.room && window.room.localParticipant) {
-                            await window.room.localParticipant.setMicrophoneEnabled(false);
-                            console.log('[autobrowser:event] Mic muted by harness (simulate user stop)');
-                        }
-                        // Reset trace: only measure EoT→playout AFTER mic mute
-                        if (window.resetForMeasurement) window.resetForMeasurement();
-                    }
-                """)
-            except Exception:
-                pass  # non-fatal
+            # D13: No more mic mute + resetForMeasurement.
+            # The input WAV now has 10s silence appended, so Chromium won't
+            # loop back into speech within the recording window. monitorMic
+            # naturally detects EoT via energy drop. This gives us honest
+            # USER_KPI values (including negative = talk-over).
 
             # Wait for auto-disconnect (remaining recording period)
             try:
@@ -262,7 +256,6 @@ async def _run_browser_case(
                     timeout=(record_seconds + 15) * 1000,
                 )
             except Exception:
-                # Timeout is expected if auto_disconnect_s worked
                 pass
 
             # Collect browser traces
@@ -276,7 +269,6 @@ async def _run_browser_case(
             # Save recording via page-side download
             if has_blob:
                 try:
-                    # Convert blob to base64 in browser
                     b64_data = await page.evaluate("""
                         async () => {
                             const blob = window.__autobrowser_recording_blob;
@@ -299,7 +291,7 @@ async def _run_browser_case(
                         result["recording_webm"] = webm_path
                         result["recording_bytes"] = len(raw)
 
-                        # Convert webm → wav using ffmpeg if available
+                        # Convert webm -> wav using ffmpeg if available
                         wav_path = os.path.join(case_dir, "post_browser_reply.wav")
                         try:
                             subprocess.run(
@@ -309,7 +301,6 @@ async def _run_browser_case(
                             )
                             result["recording_wav"] = wav_path
                         except (FileNotFoundError, subprocess.CalledProcessError):
-                            # ffmpeg not available, keep webm
                             pass
                 except Exception as e:
                     result["error"] = f"Recording save error: {e}"
@@ -392,7 +383,6 @@ def main() -> int:
     # Auto-detect page URL from token_server
     page_url = args.page_url
     if not page_url:
-        # token_api is http://host:port/api/token → page is http://host:port/webrtc_test.html
         base = args.token_api.rsplit("/api/", 1)[0]
         page_url = f"{base}/webrtc_test.html"
 
@@ -408,11 +398,6 @@ def main() -> int:
     print(f"[AutoBrowser] page_url={page_url}")
     print(f"[AutoBrowser] output={run_dir}")
 
-    # Apply network profile
-    netem_applied = False
-    if args.net != "wifi_good":
-        netem_applied = _apply_netem(args.net_interface, args.net)
-
     # Prepare WAV cache dir for 48k conversions
     wav_cache_dir = os.path.join(run_dir, ".wav_cache")
     os.makedirs(wav_cache_dir, exist_ok=True)
@@ -424,6 +409,15 @@ def main() -> int:
         "page_url": page_url,
         "cases": [],
     }
+
+    # Apply network profile
+    netem_applied = False
+    if args.net != "wifi_good":
+        netem_applied = _apply_netem(args.net_interface, args.net)
+        if not netem_applied:
+            print(f"[netem] NOTE: Running with label '{args.net}' but netem not applied "
+                  f"(need NET_ADMIN or --cap-add=NET_ADMIN)")
+        summary["netem_actually_applied"] = netem_applied
 
     for idx, case in enumerate(cases):
         case_id = case["case_id"]
@@ -439,7 +433,7 @@ def main() -> int:
 
         # Convert wav to 48k for Chromium fake capture
         wav_48k = os.path.join(wav_cache_dir, f"{case_id}_48k.wav")
-        wav_48k = _convert_wav_for_chromium(wav_path, wav_48k)
+        wav_48k = _prepare_chromium_wav(wav_path, wav_48k)
 
         # Get token
         try:
@@ -496,19 +490,28 @@ def main() -> int:
             "net_profile": args.net,
         })
 
-        # Extract USER_KPI from browser traces
-        user_kpi_ms = None
+        # D13: Extract USER_KPI raw + clamped + talk_over from browser traces
         traces = browser_result.get("browser_traces", [])
+        user_kpi_raw_ms = None
+        user_kpi_clamped_ms = None
+        is_talk_over = False
         if traces:
-            kpis = [t["user_kpi_ms"] for t in traces if t.get("user_kpi_ms") is not None]
-            if kpis:
-                user_kpi_ms = kpis[0]  # first turn
+            for t in traces:
+                if t.get("user_kpi_raw_ms") is not None:
+                    user_kpi_raw_ms = t["user_kpi_raw_ms"]
+                    user_kpi_clamped_ms = t.get("user_kpi_ms")
+                    is_talk_over = t.get("is_talk_over", False)
+                    break
 
         status = "PASS" if browser_result["ok"] else "FAIL"
-        join_status = "✅" if browser_result["joined"] else "❌"
-        audio_status = "✅" if browser_result["has_reply_audio"] else "❌"
-        kpi_str = f"{user_kpi_ms}ms" if user_kpi_ms else "N/A"
-        print(f"  {status} join={join_status} audio={audio_status} USER_KPI={kpi_str} ({elapsed:.1f}s)")
+        join_s = "Y" if browser_result["joined"] else "N"
+        audio_s = "Y" if browser_result["has_reply_audio"] else "N"
+        if user_kpi_raw_ms is not None:
+            to_flag = " TALK-OVER" if is_talk_over else ""
+            kpi_str = f"raw={user_kpi_raw_ms}ms{to_flag}"
+        else:
+            kpi_str = "N/A"
+        print(f"  {status} join={join_s} audio={audio_s} {kpi_str} ({elapsed:.1f}s)")
         if browser_result.get("error"):
             print(f"  ERROR: {browser_result['error']}")
 
@@ -518,7 +521,9 @@ def main() -> int:
             "ok": browser_result["ok"],
             "joined": browser_result["joined"],
             "has_reply_audio": browser_result["has_reply_audio"],
-            "user_kpi_ms": user_kpi_ms,
+            "user_kpi_raw_ms": user_kpi_raw_ms,
+            "user_kpi_ms": user_kpi_clamped_ms,
+            "is_talk_over": is_talk_over,
             "trace_id": trace_id,
             "room": case_room,
             "elapsed_s": elapsed,
@@ -553,17 +558,38 @@ def main() -> int:
     summary["joined_cases"] = joined
     summary["has_audio_cases"] = has_audio
 
-    # USER_KPI aggregates
-    kpi_vals = [c["user_kpi_ms"] for c in summary["cases"]
-                if c.get("user_kpi_ms") is not None]
-    if kpi_vals:
-        import numpy as np
-        arr = np.array(kpi_vals, dtype=np.float64)
-        summary["user_kpi_p50_ms"] = float(np.percentile(arr, 50))
-        summary["user_kpi_p95_ms"] = float(np.percentile(arr, 95))
-        summary["user_kpi_p99_ms"] = float(np.percentile(arr, 99))
-        summary["user_kpi_max_ms"] = float(np.max(arr))
-        summary["user_kpi_count"] = len(kpi_vals)
+    # D13: USER_KPI aggregates — raw (honest) + clamped + talk-over
+    import numpy as np
+    raw_vals = [c["user_kpi_raw_ms"] for c in summary["cases"]
+                if c.get("user_kpi_raw_ms") is not None]
+    clamped_vals = [c["user_kpi_ms"] for c in summary["cases"]
+                    if c.get("user_kpi_ms") is not None]
+    talk_overs = [c for c in summary["cases"] if c.get("is_talk_over")]
+    talk_over_raw = [abs(c["user_kpi_raw_ms"]) for c in talk_overs
+                     if c.get("user_kpi_raw_ms") is not None]
+
+    if raw_vals:
+        arr_raw = np.array(raw_vals, dtype=np.float64)
+        arr_clamp = np.array(clamped_vals, dtype=np.float64) if clamped_vals else arr_raw
+        # Raw (honest, may include negatives)
+        summary["user_kpi_raw_p50_ms"] = float(np.percentile(arr_raw, 50))
+        summary["user_kpi_raw_p95_ms"] = float(np.percentile(arr_raw, 95))
+        summary["user_kpi_raw_p99_ms"] = float(np.percentile(arr_raw, 99))
+        summary["user_kpi_raw_min_ms"] = float(np.min(arr_raw))
+        summary["user_kpi_raw_max_ms"] = float(np.max(arr_raw))
+        # Clamped (for turn-taking gate)
+        summary["user_kpi_p50_ms"] = float(np.percentile(arr_clamp, 50))
+        summary["user_kpi_p95_ms"] = float(np.percentile(arr_clamp, 95))
+        summary["user_kpi_p99_ms"] = float(np.percentile(arr_clamp, 99))
+        summary["user_kpi_max_ms"] = float(np.max(arr_clamp))
+        summary["user_kpi_count"] = len(raw_vals)
+    # Talk-over stats
+    summary["talk_over_count"] = len(talk_overs)
+    if talk_over_raw:
+        arr_to = np.array(talk_over_raw, dtype=np.float64)
+        summary["talk_over_ms_p95"] = float(np.percentile(arr_to, 95))
+    else:
+        summary["talk_over_ms_p95"] = 0
 
     summary_path = os.path.join(run_dir, "summary.json")
     write_json(summary_path, summary)
@@ -576,10 +602,16 @@ def main() -> int:
     print(f"[AutoBrowser] RESULT: {ok}/{total} cases OK")
     print(f"[AutoBrowser] Joined: {joined}/{total}")
     print(f"[AutoBrowser] Has Audio: {has_audio}/{total}")
-    if kpi_vals:
-        print(f"[AutoBrowser] USER_KPI P50={summary['user_kpi_p50_ms']:.0f}ms "
+    if raw_vals:
+        print(f"[AutoBrowser] USER_KPI raw: P50={summary['user_kpi_raw_p50_ms']:.0f}ms "
+              f"P95={summary['user_kpi_raw_p95_ms']:.0f}ms "
+              f"P99={summary['user_kpi_raw_p99_ms']:.0f}ms "
+              f"min={summary['user_kpi_raw_min_ms']:.0f}ms")
+        print(f"[AutoBrowser] USER_KPI clamped: P50={summary['user_kpi_p50_ms']:.0f}ms "
               f"P95={summary['user_kpi_p95_ms']:.0f}ms "
               f"P99={summary['user_kpi_p99_ms']:.0f}ms")
+    print(f"[AutoBrowser] Talk-over: {summary['talk_over_count']}/{total} cases "
+          f"(P95 abs={summary.get('talk_over_ms_p95', 0):.0f}ms)")
     print(f"[AutoBrowser] Net Profile: {args.net}")
     print(f"[AutoBrowser] Summary: {summary_path}")
     print(f"[AutoBrowser] Report: {report_path}")
@@ -614,13 +646,31 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
         f.write("| # | case_id | tier | ok | joined | audio | USER_KPI | elapsed |\n")
         f.write("|---|---------|------|----|--------|-------|----------|---------|\n")
         for i, c in enumerate(summary.get("cases", [])):
-            ok_s = "✅" if c.get("ok") else "❌"
-            j_s = "✅" if c.get("joined") else "❌"
-            a_s = "✅" if c.get("has_reply_audio") else "❌"
-            kpi = f"{c['user_kpi_ms']}ms" if c.get("user_kpi_ms") else "—"
+            ok_s = "PASS" if c.get("ok") else "FAIL"
+            j_s = "Y" if c.get("joined") else "N"
+            a_s = "Y" if c.get("has_reply_audio") else "N"
+            kpi = f"{c['user_kpi_ms']}ms" if c.get("user_kpi_ms") is not None else "—"
             elapsed = f"{c.get('elapsed_s', 0):.0f}s"
             f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | "
                     f"{ok_s} | {j_s} | {a_s} | {kpi} | {elapsed} |\n")
+
+        # WARN gate
+        if summary.get("user_kpi_p95_ms") is not None:
+            p95 = summary["user_kpi_p95_ms"]
+            warn_ok = p95 <= 900.0
+            f.write(f"\n## WARN Gate\n\n")
+            f.write(f"- {'OK' if warn_ok else 'WARN'}: USER_KPI P95 <= 900ms "
+                    f"(actual: `{p95:.0f}ms`)\n")
+            f.write(f"- Target: <= 600ms | Stretch: <= 450ms\n")
+
+        # Net profile info
+        f.write(f"\n## Network Profile: `{net_profile}`\n\n")
+        prof = NET_PROFILES.get(net_profile, {})
+        if prof:
+            f.write(f"- Description: {prof.get('description', 'N/A')}\n")
+            f.write(f"- Delay: {prof.get('delay_ms', 0)}ms one-way | "
+                    f"Jitter: {prof.get('jitter_ms', 0)}ms | "
+                    f"Loss: {prof.get('loss_pct', 0)}%\n")
 
         # Errors
         errors = [c for c in summary.get("cases", []) if c.get("error")]
@@ -632,4 +682,3 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

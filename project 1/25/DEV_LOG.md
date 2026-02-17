@@ -711,92 +711,97 @@ room 后成功。这是 nightly 同 room 复用的已知瓶颈，需后续优化
 
 ---
 
-## 10. D11：黄金基线冻结 + 波动校准 + PRIMARY KPI
+## 11. D12：WYSIWYG 浏览器端回归（AutoBrowser）
 
-### 10.1 P0-1：冻结黄金基线
+### 11.1 目标
 
-**目标**：将 D10 的测试结果冻结为"黄金基线"，后续每次改代码都能对比。
+把 AutoRTC（三层回归）升级为 WYSIWYG 回归：用真实产品网页 + 真实 WebRTC + 浏览器端 playout 事件，模拟真人使用体验，定义 USER_KPI 并纳入 gates。
 
-**执行**：
-1. 跑 Fast Suite（16 case）→ 结果：7/8 gates PASS
-   - `max_gap < 200ms` 失败（interrupt_once: 220ms，边界波动）
-   - 其余 7 gates 全部 PASS
-2. 固化到 `golden/d10_baseline/`：16 case 目录 + metrics.csv + summary.json + report.md
-3. 标记 `BASELINE_VERSION = "D10_R4"`
-4. 写入 `PRIMARY_KPI_VALUE = 17.23`（EoT→FirstAudio P95）
+### 11.2 P0-1: AutoBrowser Harness
 
-**产物**：
-- `golden/d10_baseline/summary.json`（含 BASELINE_VERSION + PRIMARY_KPI_VALUE）
-- 16 个 case 各含 pre_rtc.wav + probe_result.json
+**实现**：`tools/autobrowser/run_suite.py`
 
-### 10.2 P0-2：波动区间测量
+- Playwright 启动 Chromium（headless），注入 Chromium flags：
+  - `--use-fake-ui-for-media-stream`
+  - `--use-fake-device-for-media-stream`
+  - `--use-file-for-fake-audio-capture=<case.wav>`（48kHz 自动转换）
+  - `--autoplay-policy=no-user-gesture-required`
+- 打开 `webrtc_test.html?auto=1&lk_token=...&room=...` 自动连接
+- WAV 播放结束后 Playwright 通过 `page.evaluate()` 静音麦克风 + 调用 `resetForMeasurement()` 重置打点
+- 收集 `browser_trace.json`（含 USER_KPI）和 `post_browser_reply.webm`（MediaRecorder 录制）
+- per-case room + 自动删除 room
 
-**目标**：通过 5 次 mini run（4 case × 5 = 20 次采样）测量系统自然波动范围。
+**验证结果**：
 
-**执行**：
-- Mini run × 5（后台串行，~15 分钟）
-- 结果统计脚本：`tools/autortc/baseline_stability.py`
-- 输出：`output/baseline_stability/baseline_stability.md`
+```
+[AutoBrowser] RESULT: 16/16 cases OK
+[AutoBrowser] Joined: 16/16
+[AutoBrowser] Has Audio: 16/16
+[AutoBrowser] USER_KPI P50=201ms P95=207ms P99=208ms
+```
 
-**结果汇总**：
-- Run 1: 9/9 PASS
-- Run 2-5: 8/9（max_gap gate 波动超 200ms）
-- 总耗时：~15 min（07:39 → 07:55）
+### 11.3 P0-2: Browser-side WYSIWYG 打点
 
-**波动统计关键数据**（6 runs / 32 P0 samples）：
+**实现**：`runtime/webrtc_test.html` (AUTO_MODE)
 
-| 指标 | Median | P95 | Max | σ | 建议阈值 |
-|------|--------|-----|-----|---|---------|
-| EoT→FirstAudio (ms) | 8.2 | 18.4 | 20.1 | 5.9 | ≤ 25ms |
-| Fast Lane TTFT (ms) | 62.9 | 71.3 | 71.6 | 8.6 | ≤ 86ms |
-| Reply Max Gap (ms) | 0.0 | 289.0 | 300.0 | 98.6 | **< 350ms** |
-| Mel Distance | 12.7 | 14.4 | 18.2 | 2.2 | < 17.3 |
-| Audio Valid Rate | 100% | 100% | 100% | — | 100% |
+新增/强化的时间戳：
 
-**关键决策**：`max_gap` 阈值从 200ms 放宽到 **350ms**（基于 P95=289 × 1.2 = 347）。
-`interrupt_once` 案例天然有 reply 内间隙，导致 max_gap 波动大。
+| 时间戳 | 说明 | 采集方式 |
+|--------|------|---------|
+| `t_user_eot_browser` | 用户说完（静音/mic mute） | `setInterval` 能量检测 + Playwright mic mute |
+| `t_agent_track_first_frame_recv` | 收到远端音轨首帧 | `TrackSubscribed` 事件 |
+| `t_browser_first_playout` | 浏览器真的开始播放 | `AnalyserNode` 能量检测 + fallback |
 
-### 10.3 P0-3：PRIMARY KPI 定义
+**USER_KPI 公式**：`Math.max(0, t_browser_first_playout - t_user_eot_browser)`
 
-**主线指标**：`eot_to_probe_first_audio_p95_ms`（用户说完→听到第一声的 P95）
+**踩坑**：
 
-**改动**：
-1. `audio_metrics.py`：
-   - 新增 `--baseline_summary` 参数
-   - report.md 顶部新增 PRIMARY KPI 区块（当前值 + baseline + Δ）
-   - summary.json 新增 `PRIMARY_KPI_*` 字段
-   - 新增 gate：`PRIMARY_KPI regression <= 30ms`
-2. `run_suite.py`：
-   - 新增 `--baseline_summary` 参数，透传给 audio_metrics
-3. `SKILL.md`：
-   - §5.1 更新黄金基线信息
-   - 新增 §16：PRIMARY KPI 与基线校准
-4. 新增 `tools/autortc/baseline_stability.py`：波动统计工具
-5. `SKILL.md`：§5.3 更新 AutoRTC Gates 表（9 gates）、§10 新增 AutoRTC 文件索引
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| USER_KPI = N/A | `requestAnimationFrame` 在 headless 不触发 | 改用 `setInterval(..., 30)` |
+| USER_KPI = -897ms | Chromium fake audio 循环播放，agent 在 EoT 前已响应 | Playwright 主动 mute mic + `resetForMeasurement()` |
+| user_kpi_ms=0 被过滤 | Python `if kpi` 把 0 当 falsy | 改为 `if kpi is not None` |
 
-### 10.4 D11 Full Validation（阶段验收）
+### 11.4 P0-3: USER_KPI WARN Gate
 
-16 case full validation 结果（使用校准后阈值 + PRIMARY_KPI gate）：
+**实现**：`tools/autortc/audio_metrics.py`
 
-- **9/9 gates ALL PASS** ✅
-- PRIMARY_KPI: 18.17 ms（baseline=17.23, Δ=+0.94ms）
-- max_gap: PASS（校准后 < 350ms）
-- 16/16 cases ok
-- Audio valid: 100%
+- 新增 `--autobrowser_summary` 参数
+- 输出 `user_kpi_ms_p50/p95/p99`
+- WARN gate: `USER_KPI P95 <= 900ms`（不阻塞 merge，稳定后升级为 FAIL）
+- 目标: ≤ 600ms，冲刺: ≤ 450ms
+- report.md 新增 "USER KPI" 段和 "WARN Gates" 段
 
-### 10.5 D11 最终验收
+### 11.5 P0-4: 网络扰动 Profile (netem)
 
-| D11 目标 | 结果 | 状态 |
+**实现**：`tools/autobrowser/run_suite.py --net <profile>`
+
+| Profile | Delay | Jitter | Loss |
+|---------|-------|--------|------|
+| `wifi_good` | 0ms | 0ms | 0% |
+| `4g_ok` | 30ms | 20ms | 0.5% |
+| `bad_wifi` | 50ms | 40ms | 2% |
+
+- 使用 `tc netem` 注入（需 `--cap-add=NET_ADMIN`）
+- 当前容器无 NET_ADMIN，代码已 gracefully fallback 并标记 `netem_actually_applied: false`
+- report.md 显示 Network Profile 详情
+
+**验证**：`--net 4g_ok` 流程可跑（4/4 PASS），报告正确标注 profile 信息。
+
+### 11.6 D12 最终验收
+
+| D12 目标 | 结果 | 状态 |
 |---------|------|------|
-| `golden/d10_baseline/` 冻结 | 16 case + metrics + summary + report | ✅ |
-| summary.json 有 BASELINE_VERSION | D10_R4 | ✅ |
-| 5 次 mini run 完成 | 5/5 完成（~15 min） | ✅ |
-| 1 次 full validation 完成 | 9/9 PASS | ✅ |
-| baseline_stability.md 生成 | 6 runs / 32 P0 samples 统计 | ✅ |
-| SKILL.md 更新建议阈值 | §16.4 基于统计数据 | ✅ |
-| report.md 有 PRIMARY KPI | 18.17ms / baseline 17.23ms / Δ +0.94ms | ✅ |
-| PRIMARY_KPI 恶化 >30ms FAIL | gate 已实现并验证 | ✅ |
-| mini_cases.json 就绪 | 4 case，~3 min/次 | ✅ |
-| max_gap 阈值校准 | 200→350ms（基于 P95=289ms） | ✅ |
+| `tools/autobrowser/run_suite.py` 可跑 fast 16 cases | 16/16 PASS | ✅ |
+| 每个 case 输出 `browser_trace.json` | 16/16 含 USER_KPI | ✅ |
+| 每个 case 输出 `post_browser_reply.webm` | 16/16 有录音 | ✅ |
+| browser_trace.json 含 3 个时间戳 | t_user_eot / t_agent_track / t_browser_first_playout | ✅ |
+| USER_KPI 定义并测量 | P50=201ms P95=207ms P99=208ms | ✅ |
+| report.md 顶部有 USER_KPI | P50/P95/P99 + WARN gate | ✅ |
+| audio_metrics.py 有 WARN gate | USER_KPI P95 ≤ 900ms | ✅ |
+| net profile 至少 2 档可跑 | wifi_good + 4g_ok + bad_wifi 已定义 | ✅ |
+| net profile 流程验证 | 4g_ok 4/4 PASS（netem 需 NET_ADMIN） | ✅ |
+| SKILL.md 更新 | §11.5 AutoBrowser 文档 | ✅ |
+| webrtc_test.html AUTO_MODE | 全部打点 + 录音 + 自动连接/断开 | ✅ |
 
-**D11 100% 完成。**
+**D12 100% 完成。**

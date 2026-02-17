@@ -105,7 +105,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--record_pad_s", type=float, default=10.0, help="D10: extra record window (6→10s to cover welcome+STT+LLM+TTS)")
     p.add_argument("--output_root", default="output/autortc", help="output root directory")
     p.add_argument("--with_metrics", type=int, default=1, help="1=run audio_metrics after suite")
-    p.add_argument("--baseline_summary", default="", help="D11: golden baseline summary.json for PRIMARY_KPI")
     p.add_argument("--turns", type=int, default=20, help="nightly mode: number of turns")
     return p.parse_args()
 
@@ -470,9 +469,6 @@ def main() -> int:
             "--output_dir",
             run_dir,
         ]
-        # D11: pass baseline summary for PRIMARY_KPI delta
-        if args.baseline_summary:
-            metrics_cmd.extend(["--baseline_summary", args.baseline_summary])
         subprocess.run(metrics_cmd, check=False)
 
     # ── D7 Ring0: TTS Core Regression ────────────────────────

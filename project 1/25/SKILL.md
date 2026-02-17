@@ -237,18 +237,9 @@ ps aux | grep tts_server
 
 ### 5.1 黄金基线
 
-**AutoRTC 黄金基线（D11 冻结）**：`golden/d10_baseline/summary.json`
+当前黄金基线：`/workspace/project 1/25/output/regression/20260208_200725/summary.json`
 
 基线配置：0.6B 模型，GP=0，incremental，packet=2，left_context=72，greedy seed=42，**CP Graph=1，Decoder Graph=1**。
-
-| 指标 | 基线值 |
-|------|--------|
-| PRIMARY_KPI (EoT→FirstAudio P95) | 17.23 ms |
-| BASELINE_VERSION | D10_R4 |
-| total_cases | 16 (12 P0 + 4 P1) |
-| ok_cases | 16/16 |
-
-**TTS 回归基线**：`output/regression/20260208_200725/summary.json`
 
 > 历史基线（无 Graph）：`output/regression/20260207_192126/`，保留供参考。
 
@@ -262,9 +253,7 @@ bash "/workspace/project 1/25/scripts/run_ci_regression.sh" --mode fast
 bash "/workspace/project 1/25/scripts/run_ci_regression.sh" --mode full
 ```
 
-### 5.3 质量 Gates
-
-#### TTS 回归 Gates（所有 gate 必须 PASS）
+### 5.3 质量 Gates（所有 gate 必须 PASS）
 
 | Gate | 说明 | 阈值 |
 |---|---|---|
@@ -274,20 +263,6 @@ bash "/workspace/project 1/25/scripts/run_ci_regression.sh" --mode full
 | `SNR_vs_baseline` | 与黄金基线信噪比 | ≥ 15dB |
 | `TTFA` | 首音频包延迟 | ≤ 350ms |
 | `stream_bad_audio` | 无空/损坏音频 | empty |
-
-#### AutoRTC Gates（9 gates，D11 校准后）
-
-| Gate | 阈值 | 说明 |
-|---|---|---|
-| `EoT→FirstAudio P95` | ≤ 650ms | 端到端响应延迟 |
-| `tts_first→publish P95` | ≤ 120ms | TTS 首帧到发布延迟 |
-| `audible_dropout (P0 reply)` | == 0 | 可听断裂次数 |
-| `max_gap (P0 reply)` | **< 350ms** | reply 段内最大静音间隙（D11 从 200→350） |
-| `clipping_ratio` | < 0.1% | 削波比例 |
-| `fast lane TTFT P95` | ≤ 80ms | LLM 快车道首 token |
-| `P0 audio valid rate` | 100% | 有声比例 |
-| `inter_arrival P95` | ≤ 30ms | 帧间到达时间 |
-| `PRIMARY_KPI regression` | ≤ 30ms | D11 新增：主线 KPI 不恶化超过 30ms |
 
 ### 5.4 典型回归流程
 
@@ -497,25 +472,12 @@ export TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 保持关闭
 
 | 文件 | 说明 |
 |---|---|
-| `clients/tts_regression_suite.py` | TTS 回归测试套件（fast/full） |
+| `clients/tts_regression_suite.py` | 回归测试套件（fast/full） |
 | `clients/codegen_only_benchmark.py` | Codegen-only RTF 基准 |
 | `clients/decoder_microbench.py` | Decoder-only 微基准 |
 | `clients/throughput_benchmark.py` | 端到端吞吐基准 |
 | `clients/tts_codes_dump.py` | Codes dump 工具 |
 | `clients/tts_codes_eval.py` | Codes 质量评估 |
-
-### AutoRTC 回归系统（D9-D11）
-
-| 文件 | 说明 |
-|---|---|
-| `tools/autortc/run_suite.py` | AutoRTC 测试编排器（fast/nightly 模式） |
-| `tools/autortc/audio_metrics.py` | 三层指标分析 + gate 判定 + PRIMARY_KPI |
-| `tools/autortc/baseline_stability.py` | D11 波动统计工具 |
-| `tools/autortc/user_bot.py` | 用户音频推送 bot |
-| `tools/autortc/probe_bot.py` | Agent 音频录制 bot |
-| `tools/autortc/common.py` | 通用工具（wav I/O、JSON I/O） |
-| `tools/autortc/cases/all_cases.json` | 全部 16 个测试用例（fast suite） |
-| `tools/autortc/cases/mini_cases.json` | 4 个代表性用例（日常迭代） |
 | `clients/tts_cancel_stress.py` | 取消请求压测 |
 | `clients/tts_cached_decode_poc.py` | 缓存解码 PoC（参考用） |
 | `clients/llm_smoke_test.py` | LLM 烟测 |
@@ -557,9 +519,7 @@ export TTS_CODEGEN_CUDAGRAPH_TALKER=0  # 保持关闭
 
 | 目录 | 说明 |
 |---|---|
-| `golden/d10_baseline/` | **D11 冻结黄金基线**（16 case, PRIMARY_KPI=17.23ms） |
-| `output/baseline_stability/` | D11 波动统计报告 + mini runs |
-| `output/regression/20260208_200725/` | TTS 回归黄金基线（CP+Decoder Graph, 全 PASS） |
+| `output/regression/20260208_200725/` | **当前黄金基线**（CP+Decoder Graph, 全 PASS） |
 | `output/regression/latest/` | 最新回归的符号链接 |
 | `output/day5_e2e_traces.jsonl` | D5 端到端延迟 trace（22 轮） |
 | `output/day3_stress_cancel_report.json` | D3 压测报告（200轮, cancel P95=7.5ms） |
@@ -665,6 +625,67 @@ run_suite.py                    ← 编排层
 | **subprocess 超时挂死** | bot 进程卡住导致 suite 整体终止 | 用 `try/except TimeoutExpired` 包裹 `wait()`，超时后 `kill()` |
 | **max_gap 全段 vs reply 段** | 全段自然有 welcome→silence→reply 间隔 | 只在 reply 段（`reply_start` 到 `reply_end`）测 max_gap |
 | **mel_distance = -1** | pre_rtc 或 post_rtc 文件缺失 | 用 `capture_status` 标记，仅 `OK` 时计算 mel |
+
+### 11.5 D12 AutoBrowser — WYSIWYG 浏览器端回归
+
+在 AutoRTC（Ring0/1/2 工程护栏）之上，新增 Ring3（Real Browser），用真实 Chromium 浏览器打开产品网页 `webrtc_test.html`，模拟真人使用时的端到端体验。
+
+```
+tools/autobrowser/run_suite.py          ← Playwright 编排器
+  ├── Chromium (headless)               ← 真实浏览器参与者
+  │   └── webrtc_test.html              ← 产品网页（AUTO_MODE）
+  ├── --use-file-for-fake-audio-capture  ← 注入用户音频
+  └── browser_trace.json + post_browser_reply.webm  ← 产物
+```
+
+#### 11.5.1 USER_KPI 定义
+
+```
+USER_KPI = t_browser_first_playout - t_user_eot_browser
+```
+
+| 时间戳 | 含义 | 采集方式 |
+|--------|------|---------|
+| `t_user_eot_browser` | 浏览器端判定用户说完 | Playwright mic mute → `resetForMeasurement()` |
+| `t_browser_first_playout` | 浏览器真的播放出声 | AnalyserNode 能量检测 / TrackSubscribed fallback |
+
+#### 11.5.2 Gates
+
+| Gate | 阈值 | 类型 | 说明 |
+|------|------|------|------|
+| `USER_KPI P95` | ≤ 900ms | WARN | 第一阶段，采样稳定后升级为 FAIL |
+| 目标 | ≤ 600ms | — | 产品 KPI 目标 |
+| 冲刺 | ≤ 450ms | — | 极致体验目标 |
+
+#### 11.5.3 Net Profile（P0-4）
+
+| Profile | Delay | Jitter | Loss | 场景 |
+|---------|-------|--------|------|------|
+| `wifi_good` | 0ms | 0ms | 0% | Baseline |
+| `4g_ok` | 30ms | 20ms | 0.5% | 4G 网络 |
+| `bad_wifi` | 50ms | 40ms | 2% | 弱 WiFi |
+
+需要 `--cap-add=NET_ADMIN` 才能实际注入 `tc netem`。
+
+#### 11.5.4 AutoBrowser 文件
+
+| 文件 | 说明 |
+|---|---|
+| `tools/autobrowser/run_suite.py` | Playwright 编排器（fast/nightly, net profile） |
+| `runtime/webrtc_test.html` | 产品网页（含 AUTO_MODE + 打点 + 录音） |
+| `tools/autortc/audio_metrics.py` | USER_KPI WARN gate（`--autobrowser_summary`） |
+
+#### 11.5.5 产物
+
+每个 case 输出到 `output/autobrowser/<run_id>/<case_id>/`：
+
+| 文件 | 说明 |
+|---|---|
+| `browser_trace.json` | 浏览器端打点（含 USER_KPI） |
+| `post_browser_reply.webm` | 浏览器端录制的 Agent 回复音频 |
+| `browser_console.log` | 浏览器控制台日志 |
+
+汇总：`output/autobrowser/<run_id>/summary.json` + `report.md`
 
 ---
 
@@ -868,53 +889,6 @@ case_room = f"{args.room}-{case_id}-{run_id[-6:]}"
 # turn 结束后: delete_room(case_room) + sleep(20)
 ```
 
----
-
-## 15. 测试分级策略（快 vs 全）
-
-### 15.1 原则：日常迭代 ≤ 3 分钟，阶段验收 ≤ 15 分钟
-
-| 级别 | 用途 | cases | 预计耗时 | 何时跑 |
-|------|------|-------|---------|--------|
-| **mini** | 日常改代码后快速验证 | 4 个代表性 P0 | **~3 分钟** | 每次代码改动后 |
-| **fast** | 完整 P0+P1 验证 | 16 全部 case | **~15 分钟** | 冻结基线/阶段交付 |
-| **nightly** | 稳定性压测 | 20 turns | **~17 分钟** | 阶段交付前跑一次 |
-| **stability** | 波动采样（mini×5） | 4 case × 5 runs | **~15 分钟** | 初始化基线时 |
-
-### 15.2 Mini Cases（`tools/autortc/cases/mini_cases.json`）
-
-4 个代表性 case，覆盖核心场景：
-
-| case_id | 覆盖场景 |
-|---------|---------|
-| `endpoint_short_hello` | 短句端到端延迟 |
-| `endpoint_long_sentence` | 长句 TTS 稳定性 |
-| `interrupt_once` | 打断处理 |
-| `noise_background` | 噪音鲁棒性 |
-
-```bash
-# 日常迭代用这个（~3分钟）
-python3 -u tools/autortc/run_suite.py \
-  --cases_json tools/autortc/cases/mini_cases.json \
-  --token_api http://127.0.0.1:9090/api/token \
-  --output_root output/autortc --ring0 0 --with_metrics 1
-
-# 阶段验收用这个（~15分钟）
-python3 -u tools/autortc/run_suite.py \
-  --cases_json tools/autortc/cases/all_cases.json \
-  --token_api http://127.0.0.1:9090/api/token \
-  --output_root output/autortc --ring0 0 --with_metrics 1
-```
-
-### 15.3 铁律
-
-1. **Take data 不超过 30 分钟**：如果一个采样计划超过 30 分钟，必须用 mini cases 或减少重复次数
-2. **日常迭代用 mini**（~3 min），只在**阶段性交付**时才跑 full（~15 min）
-3. **波动采样用 mini×5**（~15 min），不用 full×5（~75 min）
-4. **Nightly 只在交付前跑一次**，不用于日常验证
-
----
-
 ### 14.10 P1 异常指纹检测要点
 
 | 异常类型 | 检测位置 | 指标 | 说明 |
@@ -925,72 +899,3 @@ python3 -u tools/autortc/run_suite.py \
 
 关键教训：boom_trigger 的 spike 必须在 **input wav** 上检测（`_audio_quality_metrics(input_wav)`），
 不能只查 agent 输出——因为 agent 的 TTS 生成的是全新音频，不会包含用户输入的 spike。
-
----
-
-## 16. PRIMARY KPI 与基线校准（D11）
-
-### 16.1 PRIMARY KPI 定义
-
-**主线优化指标**：`eot_to_probe_first_audio_p95_ms`
-
-含义：从用户说完最后一个字（End-of-Turn），到 probe 第一次收到 Agent 音频的 P95 延迟。
-这是用户最直接感受到的"等了多久才听到回复"。
-
-- 基线值（D10）：**17.23 ms**
-- 每次跑 suite 时，report.md 顶部自动显示当前值 + baseline + Δ
-- 如果 PRIMARY_KPI 比 baseline 恶化超过 30ms，自动 FAIL
-
-### 16.2 使用方法
-
-```bash
-# 日常迭代（自动对比 golden baseline）
-python3 -u tools/autortc/run_suite.py \
-  --cases_json tools/autortc/cases/mini_cases.json \
-  --token_api http://127.0.0.1:9090/api/token \
-  --output_root output/autortc --ring0 0 --with_metrics 1 \
-  --baseline_summary golden/d10_baseline/summary.json
-
-# 也可通过环境变量指定
-export TTS_REGRESSION_BASELINE_SUMMARY=golden/d10_baseline/summary.json
-```
-
-### 16.3 黄金基线目录结构
-
-```
-golden/d10_baseline/
-├── summary.json          # BASELINE_VERSION + PRIMARY_KPI_VALUE
-├── metrics.csv           # 全量指标 CSV
-├── report.md             # Gate 报告
-└── <case_id>/            # 16 个 case 各自的产物
-    ├── pre_rtc.wav       # Agent TTS 直出音频
-    ├── post_rtc_reply.wav # 经 WebRTC 后的回复段
-    ├── probe_result.json  # probe 采集结果
-    └── user_result.json   # user bot 结果
-```
-
-### 16.4 建议 Gate 阈值（基于 D11 波动统计，6 runs / 32 P0 samples）
-
-| Gate | 当前阈值 | 统计 median | 统计 P95 | 统计 σ | 建议阈值 | 方法 |
-|------|---------|-----------|---------|--------|---------|------|
-| EoT→FirstAudio P95 | ≤ 650ms | 8.2ms | 18.4ms | 5.9ms | **≤ 25ms** | P95 × 1.2 + margin |
-| TTS First→Publish P95 | ≤ 120ms | 0.3ms | 1.0ms | 0.3ms | **≤ 2ms** | P95 × 1.2 |
-| Max Gap (P0 reply) | < 200ms | 0.0ms | 289ms | 98.6ms | **< 350ms** | P95 × 1.2 |
-| Clipping Ratio | < 0.1% | 0.0 | 0.0 | 0.0 | **< 0.1%** | 保持不变 |
-| Fast Lane TTFT P95 | ≤ 80ms | 62.9ms | 71.3ms | 8.6ms | **≤ 86ms** | median + 2σ |
-| Audible Dropout | == 0 | 0 | 0 | 0 | **== 0** | 保持不变 |
-| Audio Valid Rate | 100% | 100% | 100% | — | **100%** | 保持不变 |
-| PRIMARY_KPI regression | ≤ 30ms | — | — | — | **≤ 30ms** | 硬限 |
-
-> **关键发现**：`max_gap` 当前阈值 200ms 太紧（P95=289ms），建议放宽到 350ms。
-> `interrupt_once` 案例天然有 reply 内间隙，导致 max_gap 波动大。
-
-### 16.5 波动分析工具
-
-```bash
-# 生成波动统计报告
-python3 tools/autortc/baseline_stability.py \
-  --run_dirs output/baseline_stability/mini_runs/run_*/*/  \
-  --output_dir output/baseline_stability
-# 输出: output/baseline_stability/baseline_stability.md
-```
