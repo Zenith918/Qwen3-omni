@@ -607,9 +607,9 @@ def main() -> int:
         "tts_first->publish P95 <= 120ms":
             (_pct(tts_first_publish, 95) or float("inf")) <= 120.0,
         "audible_dropout == 0 (P0 reply)":
+            p0_audible == 0,
         "max_gap < 200ms (P0 reply)":
             p0_max_gap < 200.0,
-            p0_max_gap < 350.0,
         "clipping_ratio < 0.1%":
             (max(clipping_ratios) if clipping_ratios else 1.0) < 0.001,
         "fast lane TTFT P95 <= 80ms":
@@ -671,47 +671,83 @@ def main() -> int:
         if warns:
             p1_warns.append((cid, warns))
 
-    # ── D12: USER_KPI from autobrowser (WARN gate, not blocking) ──
+    # ── D13: USER_KPI from autobrowser (raw/clamped/talk_over) ──
+    user_kpi_data = {}
     user_kpi_p95 = None
-        f.write("# AutoRTC Report (D10)\n\n")
+    talk_over_count = 0
+    talk_over_ms_p95 = None
+    if args.autobrowser_summary and os.path.exists(args.autobrowser_summary):
         try:
-            ab = _read_json(autobrowser_path)
+            ab = _read_json(args.autobrowser_summary)
             user_kpi_data = {
-                "p50": ab.get("user_kpi_p50_ms"),
-                "p95": ab.get("user_kpi_p95_ms"),
-                "p99": ab.get("user_kpi_p99_ms"),
-                "max": ab.get("user_kpi_max_ms"),
+                "raw_p50": ab.get("user_kpi_raw_p50_ms"),
+                "raw_p95": ab.get("user_kpi_raw_p95_ms"),
+                "raw_p99": ab.get("user_kpi_raw_p99_ms"),
+                "raw_min": ab.get("user_kpi_raw_min_ms"),
+                "raw_max": ab.get("user_kpi_raw_max_ms"),
+                "clamped_p50": ab.get("user_kpi_p50_ms"),
+                "clamped_p95": ab.get("user_kpi_p95_ms"),
+                "clamped_p99": ab.get("user_kpi_p99_ms"),
+                "clamped_max": ab.get("user_kpi_max_ms"),
                 "count": ab.get("user_kpi_count", 0),
+                "talk_over_count": ab.get("talk_over_count", 0),
+                "talk_over_ms_p95": ab.get("talk_over_ms_p95"),
             }
-            user_kpi_p95 = ab.get("user_kpi_p95_ms")
+            user_kpi_p95 = user_kpi_data.get("clamped_p95")
+            talk_over_count = user_kpi_data.get("talk_over_count", 0)
+            talk_over_ms_p95 = user_kpi_data.get("talk_over_ms_p95")
         except Exception:
             pass
 
-    # USER_KPI WARN gate (does not block merge, informational)
-        f.write(f"- EoT->FirstAudio P95 (P0 valid): `{_pct(p0_eot, 95)}` ms\n")
-        f.write(f"- tts_first->publish P95: `{_pct(tts_first_publish, 95)}` ms\n")
-        f.write(f"- fast lane TTFT P95: `{_pct(fast_lane_ttft, 95)}` ms\n")
+    # D13 P0-4: USER_KPI WARN gate (prepare for FAIL upgrade)
+    # Current: WARN only. After stability sampling, set FAIL threshold = baseline_P95 + 50ms
+    USER_KPI_WARN_THRESHOLD_MS = 900.0
+    warn_gates = {}
+    if user_kpi_p95 is not None:
+        warn_gates["USER_KPI P95 <= 900ms (WARN)"] = user_kpi_p95 <= USER_KPI_WARN_THRESHOLD_MS
 
     # Write USER_KPI into summary
     summary["USER_KPI_P95_MS"] = user_kpi_p95
     summary["USER_KPI_DATA"] = user_kpi_data
+    summary_path = os.path.join(args.output_dir, "summary.json")
     try:
         with open(summary_path, "w", encoding="utf-8") as sf:
             json.dump(summary, sf, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
-    # ── 写报告 ──
+    # ── Write report ──
     report_path = out_dir / "report.md"
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoRTC Report (D11)\n\n")
+        f.write("# AutoRTC Report (D13)\n\n")
 
-        # D11: PRIMARY KPI section at top
-        f.write("## PRIMARY KPI\n\n")
-        f.write(f"- **EoT→FirstAudio P95**: `{round(primary_kpi, 2) if primary_kpi is not None else 'N/A'}` ms\n")
-        f.write(f"- Baseline (D10): `{baseline_value}` ms\n")
-        f.write(f"- Δ: `{primary_kpi_delta if primary_kpi_delta is not None else 'N/A'}` ms\n\n")
+        # D13: Turn-taking KPI table
+        f.write("## Turn-taking KPI\n\n")
+        f.write("| Metric | Value |\n")
+        f.write("|--------|-------|\n")
+        if user_kpi_data:
+            f.write(f"| USER_KPI (clamped) P50 | {user_kpi_data.get('clamped_p50', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (clamped) P95 | {user_kpi_data.get('clamped_p95', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (clamped) P99 | {user_kpi_data.get('clamped_p99', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (raw) P50 | {user_kpi_data.get('raw_p50', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (raw) P95 | {user_kpi_data.get('raw_p95', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (raw) min | {user_kpi_data.get('raw_min', 'N/A')} ms |\n")
+            f.write(f"| USER_KPI (raw) max | {user_kpi_data.get('raw_max', 'N/A')} ms |\n")
+            f.write(f"| count | {user_kpi_data.get('count', 'N/A')} |\n")
+        else:
+            f.write("| (no autobrowser data) | — |\n")
+        f.write("\n")
 
+        # D13: Duplex KPI table
+        f.write("## Duplex KPI\n\n")
+        f.write("| Metric | Value |\n")
+        f.write("|--------|-------|\n")
+        f.write(f"| talk_over_count | {talk_over_count} |\n")
+        f.write(f"| talk_over_ms P95 | {talk_over_ms_p95 if talk_over_ms_p95 is not None else 'N/A'} ms |\n")
+        f.write("\n")
+
+        # Run info
+        f.write("## Run Info\n\n")
         f.write(f"- run_id: `{run_id}`\n")
         f.write(f"- total_cases: `{summary.get('total_cases', 0)}`\n")
         f.write(f"- ok_cases: `{summary.get('ok_cases', 0)}`\n")
@@ -738,16 +774,26 @@ def main() -> int:
         f.write(f"- pre_rtc coverage: `{all_pre_rtc}/{total_cases}`\n")
         f.write(f"- mel valid (capture=OK): `{mel_valid}/{len(mel_ok_rows)}`\n")
 
-                    "NO_TRACE_ID": "No trace_id available → check DataChannel event propagation.",
-                }
-                suggestions.append((cid, f"PRE_MISSING({reason})",
-                    fix_map.get(reason, "Unknown reason, check agent logs.")))
-            mel = float(r.get("mel_distance", -1))
-            if cs == "OK" and mel > 15:
-                suggestions.append((cid, f"mel_distance={mel:.1f}",
-                    "High mel_distance → check resample chain, bit-width scaling, or repeated resample."))
-            dr = float(r.get("drift_ratio", -1))
-            if dr > 0 and abs(dr - 1.0) > 0.02:
+        # Gates table
+        f.write("\n## Gates\n\n")
+        f.write("| Gate | Status |\n")
+        f.write("|------|--------|\n")
+        for name, ok in gates.items():
+            status_str = "PASS ✅" if ok else "FAIL ❌"
+            f.write(f"| {name} | {status_str} |\n")
+        if warn_gates:
+            f.write("\n### WARN Gates\n\n")
+            f.write("| Gate | Status |\n")
+            f.write("|------|--------|\n")
+            for name, ok in warn_gates.items():
+                status_str = "OK ✅" if ok else "WARN ⚠️"
+                f.write(f"| {name} | {status_str} |\n")
+
+        # P1 WARN section
+        if p1_warns:
+            f.write("\n## P1 WARN Fingerprints\n\n")
+            for cid, warns in p1_warns:
+                f.write(f"- **{cid}**: {'; '.join(warns)}\n")
 
         # Per-case detail
         f.write("\n## Per-Case Detail\n\n")
@@ -817,7 +863,6 @@ def main() -> int:
     for name, ok in gates.items():
         status = "PASS ✅" if ok else "FAIL ❌"
         print(f"  {status}: {name}")
-    # WARN gates (informational)
     if warn_gates:
         print()
         for name, ok in warn_gates.items():

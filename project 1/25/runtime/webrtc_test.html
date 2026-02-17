@@ -222,14 +222,28 @@
       speechDetected = false;
     }
 
-    // D13 P0-1: finalizeTrace keeps raw, computes clamped, detects talk-over
-    function finalizeTrace() {
+    // D13 P0-1: finalizeTrace — ONLY finalize when we have BOTH EoT and playout.
+    // force=true is used when a new speech turn starts to flush the old incomplete trace.
+    let _finalize_timeout = null;
+    function finalizeTrace(force) {
       if (!currentTrace) return;
-      // Allow finalization even if only one of playout/eot exists
-      // (we record what we have and mark missing fields)
       const hasPlayout = currentTrace.t_browser_first_playout != null;
       const hasEot = currentTrace.t_user_speech_end != null;
-      if (!hasPlayout && !hasEot) return;
+
+      // Normal path: wait until we have BOTH timestamps
+      if (!force && (!hasPlayout || !hasEot)) {
+        // Schedule a timeout: if after EoT we don't get playout in 8s, force-finalize
+        if (hasEot && !_finalize_timeout) {
+          _finalize_timeout = setTimeout(() => {
+            _finalize_timeout = null;
+            log('Finalize timeout (no playout after EoT)', 'event');
+            finalizeTrace(true);
+          }, 8000);
+        }
+        return; // Don't finalize yet — wait for the missing piece
+      }
+
+      if (_finalize_timeout) { clearTimeout(_finalize_timeout); _finalize_timeout = null; }
 
       let raw_kpi_ms = null;
       let user_kpi_clamped = null;
@@ -242,10 +256,10 @@
         is_talk_over = raw_kpi_ms < 0;
       }
 
-      const label = is_talk_over
-        ? `TALK-OVER raw=${raw_kpi_ms}ms`
-        : `USER_KPI raw=${raw_kpi_ms}ms clamped=${user_kpi_clamped}ms`;
-      log(label, is_talk_over ? 'event' : 'success');
+      const label = (hasPlayout && hasEot)
+        ? (is_talk_over ? `TALK-OVER raw=${raw_kpi_ms}ms` : `USER_KPI raw=${raw_kpi_ms}ms clamped=${user_kpi_clamped}ms`)
+        : `Trace incomplete (eot=${hasEot} playout=${hasPlayout})`;
+      log(label, (hasPlayout && hasEot) ? (is_talk_over ? 'event' : 'success') : 'info');
 
       const traceData = {
         ...currentTrace,
@@ -285,10 +299,16 @@
         if (rms > SPEECH_THRESHOLD) {
           if (!speechDetected) {
             speechDetected = true;
+            // New speech detected — if previous trace has data, flush it
+            if (currentTrace && (currentTrace.t_user_speech_end != null || currentTrace.t_browser_first_playout != null)) {
+              finalizeTrace(true);
+            }
             if (!currentTrace) startBrowserTrace();
             if (!currentTrace.t_user_speech_start) {
               currentTrace.t_user_speech_start = performance.now();
             }
+            // Reset playout detection for new turn
+            agentPlayoutDetected = false;
           }
           if (speechEndTimer) { clearTimeout(speechEndTimer); speechEndTimer = null; }
         } else if (speechDetected) {
@@ -298,7 +318,7 @@
                 currentTrace.t_user_speech_end = performance.now();
                 currentTrace.t_user_eot_browser = currentTrace.t_user_speech_end;
                 log(`EoT: ${(currentTrace.t_user_speech_end - currentTrace.t_user_speech_start).toFixed(0)}ms speech`, 'event');
-                // D13: try finalize (playout may already exist = talk-over)
+                // D13: try finalize — will succeed if playout already recorded
                 finalizeTrace();
               }
               speechDetected = false;
@@ -335,7 +355,7 @@
               currentTrace.t_browser_first_playout = performance.now();
               currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
               log(`Agent playout detected (energy=${rms.toFixed(4)}, res=${PLAYOUT_POLL_MS}ms)`, 'success');
-              // D13: try finalize (EoT may already exist or not yet)
+              // D13: try finalize — will only succeed if EoT already recorded
               finalizeTrace();
             }
           }

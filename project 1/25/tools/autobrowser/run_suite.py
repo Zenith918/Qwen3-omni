@@ -620,20 +620,43 @@ def main() -> int:
 
 
 def _write_report(report_path: str, summary: dict, net_profile: str):
-    """Generate markdown report."""
+    """Generate markdown report (D13: raw/clamped/talk_over)."""
     ensure_parent(report_path)
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoBrowser Report (D12)\n\n")
+        f.write("# AutoBrowser Report (D13)\n\n")
 
-        f.write("## USER KPI (Browser-side WYSIWYG)\n\n")
+        # D13: Turn-taking KPI table (raw + clamped)
+        f.write("## Turn-taking KPI\n\n")
+        f.write("| Metric | Value |\n|--------|-------|\n")
         if summary.get("user_kpi_p50_ms") is not None:
-            f.write(f"- **USER_KPI P50**: `{summary['user_kpi_p50_ms']:.0f}` ms\n")
-            f.write(f"- **USER_KPI P95**: `{summary['user_kpi_p95_ms']:.0f}` ms\n")
-            f.write(f"- **USER_KPI P99**: `{summary['user_kpi_p99_ms']:.0f}` ms\n")
-            f.write(f"- **USER_KPI Max**: `{summary['user_kpi_max_ms']:.0f}` ms\n")
-            f.write(f"- Samples: `{summary['user_kpi_count']}`\n")
+            for lbl, key in [("clamped P50", "user_kpi_p50_ms"), ("clamped P95", "user_kpi_p95_ms"),
+                             ("clamped P99", "user_kpi_p99_ms"), ("clamped max", "user_kpi_max_ms")]:
+                v = summary.get(key)
+                if v is not None:
+                    f.write(f"| {lbl} | {v:.0f} ms |\n")
+        if summary.get("user_kpi_raw_p50_ms") is not None:
+            for lbl, key in [("raw P50", "user_kpi_raw_p50_ms"), ("raw P95", "user_kpi_raw_p95_ms"),
+                             ("raw P99", "user_kpi_raw_p99_ms"), ("raw min", "user_kpi_raw_min_ms"),
+                             ("raw max", "user_kpi_raw_max_ms")]:
+                v = summary.get(key)
+                if v is not None:
+                    f.write(f"| {lbl} | {v:.0f} ms |\n")
+        cnt = summary.get('user_kpi_count', 0)
+        f.write(f"| count | {cnt} |\n")
+        if not summary.get("user_kpi_p50_ms"):
+            f.write("| (no data) | - |\n")
+        f.write("\n")
+        # D13: Duplex KPI table
+        f.write("## Duplex KPI\n\n")
+        f.write("| Metric | Value |\n|--------|-------|\n")
+        toc = summary.get('talk_over_count', 0)
+        f.write(f"| talk_over_count | {toc} |\n")
+        to_p95 = summary.get("talk_over_ms_p95")
+        if to_p95:
+            f.write(f"| talk_over_ms P95 | {to_p95:.0f} ms |\n")
         else:
-            f.write("- No USER_KPI data collected\n")
+            f.write("| talk_over_ms P95 | N/A |\n")
+        f.write("\n")
 
         f.write(f"\n## Run Info\n\n")
         f.write(f"- run_id: `{summary['run_id']}`\n")
@@ -643,16 +666,18 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
                 f"joined: `{summary['joined_cases']}`, has_audio: `{summary['has_audio_cases']}`\n\n")
 
         f.write("## Per-Case Detail\n\n")
-        f.write("| # | case_id | tier | ok | joined | audio | USER_KPI | elapsed |\n")
-        f.write("|---|---------|------|----|--------|-------|----------|---------|\n")
+        f.write("| # | case_id | tier | ok | joined | audio | raw_ms | clamped_ms | talk_over | elapsed |\n")
+        f.write("|---|---------|------|----|--------|-------|--------|------------|-----------|----------|\n")
         for i, c in enumerate(summary.get("cases", [])):
             ok_s = "PASS" if c.get("ok") else "FAIL"
             j_s = "Y" if c.get("joined") else "N"
             a_s = "Y" if c.get("has_reply_audio") else "N"
-            kpi = f"{c['user_kpi_ms']}ms" if c.get("user_kpi_ms") is not None else "—"
+            raw_v = f"{c['user_kpi_raw_ms']:.0f}" if c.get('user_kpi_raw_ms') is not None else "—"
+            clamp_v = f"{c['user_kpi_ms']:.0f}" if c.get("user_kpi_ms") is not None else "—"
+            to_v = "Y" if c.get("is_talk_over") else ""
             elapsed = f"{c.get('elapsed_s', 0):.0f}s"
             f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | "
-                    f"{ok_s} | {j_s} | {a_s} | {kpi} | {elapsed} |\n")
+                    f"{ok_s} | {j_s} | {a_s} | {raw_v} | {clamp_v} | {to_v} | {elapsed} |\n")
 
         # WARN gate
         if summary.get("user_kpi_p95_ms") is not None:

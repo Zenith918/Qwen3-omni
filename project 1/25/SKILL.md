@@ -899,3 +899,60 @@ case_room = f"{args.room}-{case_id}-{run_id[-6:]}"
 
 关键教训：boom_trigger 的 spike 必须在 **input wav** 上检测（`_audio_quality_metrics(input_wav)`），
 不能只查 agent 输出——因为 agent 的 TTS 生成的是全新音频，不会包含用户输入的 spike。
+
+---
+
+## 15. D13 USER_KPI 生产一致性
+
+### 15.1 USER_KPI 三值定义
+
+| 字段 | 公式 | 用途 |
+|------|------|------|
+| `user_kpi_raw_ms` | `t_browser_first_playout - t_user_eot_browser` | 原始值，可为负（talk-over） |
+| `user_kpi_ms` | `max(0, raw)` | clamped，用于 turn-taking gate |
+| `is_talk_over` | `raw < 0` | duplex 指标 |
+
+### 15.2 自然 EoT 检测 vs mic mute
+
+| 方式 | D12 | D13 |
+|------|-----|-----|
+| EoT 检测 | Playwright mic mute + resetForMeasurement | 浏览器端能量下降（SPEECH_THRESHOLD=0.015, 400ms 窗口）|
+| Fake audio | 原始 WAV 48k 转换 | WAV + 10s 静音填充（`_prepare_chromium_wav`）|
+| 精度 | 30ms polling | 5ms playout / 10ms mic |
+| fftSize | 512 | 256 |
+
+**关键**：不要重新引入 mic mute + resetForMeasurement，这是 D13 核心改进。
+
+### 15.3 Playout polling 精度选择
+
+- `PLAYOUT_POLL_MS=5`: 足够检测 5ms 级别的 playout onset
+- `MIC_POLL_MS=10`: mic 能量检测不需要太频繁，10ms 足够
+- `fftSize=256`: 更小的 FFT 窗口 = 更快的频率分析 = 更及时的检测
+
+### 15.4 audio_metrics.py report 结构（D13）
+
+```
+# AutoRTC Report (D13)
+## Turn-taking KPI         ← D13 新增：raw/clamped P50/P95/P99/min/max
+## Duplex KPI              ← D13 新增：talk_over_count, talk_over_ms P95
+## Run Info
+## Capture Status
+## Aggregates
+## Gates                   ← PASS/FAIL gates 表
+### WARN Gates             ← USER_KPI WARN（准备升级为 FAIL）
+## P1 WARN Fingerprints
+## Per-Case Detail
+## Suggested Fixes
+```
+
+### 15.5 USER_KPI gate 升级路径
+
+1. **当前**：WARN gate `USER_KPI P95 <= 900ms`（不阻塞）
+2. **步骤**：运行 3x mini suite 收集波动数据
+3. **阈值设定**：`FAIL_THRESHOLD = baseline_P95 + 50ms`
+4. **升级**：在 `audio_metrics.py` 中设置 `USER_KPI_FAIL_THRESHOLD_MS` 并取消注释 FAIL gate 代码
+
+### 15.6 "代码已写但未验证"的教训
+
+D12→D13 过渡期的代码有多个语法错误（gates 字典缺值、f.write 在 with 块外、未定义变量）。
+**铁律：所有代码修改必须至少通过 `python3 -c "import py_compile; py_compile.compile(file)"` 验证编译通过。**

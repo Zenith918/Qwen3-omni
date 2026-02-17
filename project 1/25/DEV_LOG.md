@@ -805,3 +805,95 @@ room 后成功。这是 nightly 同 room 复用的已知瓶颈，需后续优化
 | webrtc_test.html AUTO_MODE | 全部打点 + 录音 + 自动连接/断开 | ✅ |
 
 **D12 100% 完成。**
+
+---
+
+## Phase 10: WYSIWYG 生产一致性升级（D13, 2026-02-17）
+
+### 10.1 背景
+
+D12 AutoBrowser 16/16 PASS，USER_KPI P50=201ms P95=207ms。但数值"过于整齐"——根因：
+1. 30ms 轮询精度 → KPI 量化到 30ms 粒度
+2. Playwright mic mute + `resetForMeasurement()` 人为截断 → 不反映真实用户 EoT
+3. Chromium fake audio 循环播放 → agent 可能在用户"说完"前就开始回复（talk-over）
+
+D13 目标：让 USER_KPI 反映真实生产环境中的用户体验。
+
+### 10.2 P0-1: USER_KPI 定义修正（代码已完成）
+
+| 字段 | 含义 |
+|------|------|
+| `user_kpi_raw_ms` | 原始值 = t_browser_first_playout - t_user_eot_browser（可为负=talk-over）|
+| `user_kpi_ms` | max(0, raw)，用于 turn-taking gate |
+| `is_talk_over` | raw < 0 时为 true |
+
+**Report 新增**：
+- Turn-taking KPI 表（raw/clamped 各 P50/P95/P99/min/max）
+- Duplex KPI 表（talk_over_count, talk_over_ms P95）
+- Gates 表 + WARN Gates 表
+
+**代码变更**：
+- `webrtc_test.html`: `finalizeTrace()` 输出 `user_kpi_raw_ms`, `user_kpi_ms`（clamped）, `is_talk_over`
+- `tools/autobrowser/run_suite.py`: summary 包含 raw/clamped/talk_over 聚合统计
+- `tools/autortc/audio_metrics.py`: 读取 autobrowser summary，生成 Turn-taking/Duplex KPI 表，WARN gate
+
+### 10.3 P0-2: Padded WAV 替代 mic mute（代码已完成）
+
+- `_prepare_chromium_wav()` 替代 `_convert_wav_for_chromium()`：在用户语音后追加 10s 静音（48kHz zeros）
+- 移除 `setMicrophoneEnabled(false)` 和 `resetForMeasurement()` 调用
+- `monitorMic` 通过能量下降自然检测 EoT（`SPEECH_THRESHOLD=0.015`，400ms 静音窗口）
+
+### 10.4 P0-3: Playout 检测精度提升（代码已完成）
+
+| 参数 | D12 | D13 |
+|------|-----|-----|
+| `PLAYOUT_POLL_MS` | 30ms | **5ms** |
+| `MIC_POLL_MS` | 30ms | **10ms** |
+| `agentAnalyser.fftSize` | 512 | **256** |
+| trace 记录 | — | `playout_resolution_ms`, `mic_resolution_ms` |
+
+### 10.5 P0-4: USER_KPI gate WARN→FAIL 准备（代码已完成，待运行数据）
+
+- `audio_metrics.py` 中 WARN gate 保持 `USER_KPI P95 <= 900ms`
+- 预留 FAIL gate 升级接口（`USER_KPI_FAIL_THRESHOLD_MS`）
+- **需在 GPU 上运行 3x mini suite 收集波动数据，确定 baseline_P95 + 50ms 阈值**
+
+### 10.6 audio_metrics.py 修复（D12 遗留 bug）
+
+D12 留下的 `audio_metrics.py` 有多个严重 bug，D13 已修复：
+
+| Bug | 修复 |
+|-----|------|
+| gates 字典语法错误（`audible_dropout` 缺值）| 补齐 `p0_audible == 0` |
+| `f.write()` 在 `with` 块外 | 重写 USER_KPI 读取和报告生成逻辑 |
+| `autobrowser_path` 未定义 | 改用 `args.autobrowser_summary` |
+| `primary_kpi`/`baseline_value` 未定义 | 替换为 Turn-taking/Duplex KPI 表 |
+| `summary_path` 未定义 | 使用 `os.path.join(args.output_dir, "summary.json")` |
+| `warn_gates` 未定义 | 在 USER_KPI 处理后正确定义 |
+| Suggested Fixes 代码重复 | 删除重复片段 |
+
+### 10.7 GPU 服务器状态
+
+GPU 服务器（RunPod L40S）在 D13 执行期间不可达（SSH 连接超时）。
+
+**以下任务需等 GPU 恢复后执行**：
+- [ ] 运行 mini 4 cases 验证 P0-1/P0-2/P0-3 → 确认 browser_trace.json 有 raw/clamped/is_talk_over
+- [ ] 确认 USER_KPI 有更大方差（非 D12 的 200±8ms 格局）
+- [ ] 确认 t_user_eot_browser 来自自然能量下降
+- [ ] P0-4: 运行 3x mini suite（repeat 3），收集 USER_KPI min/med/P95/P99/max/sigma
+- [ ] P1-1: 生成 calibration_report.md（browser USER_KPI vs probe eot_to_first_audio_ms）
+- [ ] P1-2: 检查 netem 能力（tc qdisc 或 toxiproxy fallback）
+
+### 10.8 D13 代码变更清单
+
+| 文件 | 变更 |
+|------|------|
+| `runtime/webrtc_test.html` | D13: finalizeTrace raw/clamped/is_talk_over; 5ms/10ms polling; fftSize=256; monitorMic natural EoT |
+| `tools/autobrowser/run_suite.py` | D13: _prepare_chromium_wav 10s silence; 移除 mic mute; raw/clamped/talk_over summary |
+| `tools/autortc/audio_metrics.py` | D13: 修复 gates 语法; Turn-taking/Duplex KPI 表; WARN gate; 修复多个未定义变量 |
+
+### 10.9 经验教训
+
+1. **D12 的"完美"数据是假象**：30ms polling + mic mute 造成 USER_KPI 值过于集中，不反映真实用户体验
+2. **代码未跑就不算完成**：D12→D13 之间的代码修改引入了多个语法错误（gates 字典缺值、f.write 在 with 外），说明"代码写了但未验证"的状态需要格外谨慎
+3. **自然 EoT 检测比 mic mute 更真实**：通过能量下降检测用户说完，虽然引入更多方差，但这正是生产环境中的真实情况
