@@ -79,25 +79,68 @@ D13 已改但未验证的代码：
 - 如果没有，尝试用 `toxiproxy` 或 Python socket proxy 做应用层扰动
 - 如果都不行，在报告里标注清楚
 
-## 执行步骤建议
+## GPU 服务器远程访问（零干预执行）
 
-1. 先启动必要服务（参考 `scripts/start_all.sh` 或手动启动 token_server）
-2. 跑 mini 4 cases 验证 P0-1/P0-2/P0-3 的代码改动
-3. 如果有问题，调试修复
-4. 跑 full 16 cases 确认全通
-5. 做 P0-4 stability 采样
-6. 做 P1-1 校准
-7. 更新 `_write_report()` 报告模板
-8. 更新 SKILL.md 和 DEV_LOG.md
+你有一台远程 GPU 服务器（RunPod L40S），上面跑着完整的服务栈：
+- TTS Server (:9000)
+- LLM Server (vLLM)
+- LiveKit Agent (:8089)
+- Token Server (:9090)
+- Playwright + Chromium
+
+**通过 SSH 访问**：
+```bash
+ssh gpu   # 已配置在 ~/.ssh/config
+```
+
+**项目路径**：`/workspace/project 1/25/`
+
+**在 GPU 服务器上执行命令的方式**：
+```bash
+# 单条命令
+ssh gpu 'cd "/workspace/project 1/25" && python3 -u tools/autobrowser/run_suite.py --cases_json tools/autortc/cases/mini_cases.json --token_api http://127.0.0.1:9090/api/token --record_s 25 --p0_only 1 --output_root /tmp/d13_test --inter_case_wait_s 10 2>&1'
+
+# 读文件
+ssh gpu 'cat "/workspace/project 1/25/output/autobrowser/latest/report.md"'
+
+# 检查服务状态
+ssh gpu 'curl -s http://127.0.0.1:9090/api/token?room=health\&identity=test | head -1'
+```
+
+**重要**：你的代码修改在本地（Cloud Agent VM）的 git repo 里。要让 GPU 服务器用最新代码，需要：
+```bash
+# 1. 在本地 commit + push
+git add -A && git commit -m "..." && git push origin main
+
+# 2. 在 GPU 服务器上 pull
+ssh gpu 'cd "/workspace/project 1/25" && git pull origin main'
+
+# 3. 然后在 GPU 服务器上跑测试
+ssh gpu 'cd "/workspace/project 1/25" && python3 -u tools/autobrowser/run_suite.py ...'
+```
+
+## 执行步骤
+
+1. **验证 SSH 连通性**：`ssh gpu 'echo OK && hostname'`
+2. **验证服务可用**：`ssh gpu 'curl -s http://127.0.0.1:9090/api/token?room=test\&identity=test | python3 -m json.tool | head -3'`
+3. **在本地改代码**（如果需要修改）
+4. **push 到 GitHub → SSH pull → 在 GPU 上跑测试**
+5. **读取结果**：`ssh gpu 'cat /tmp/d13_test/*/report.md'`
+6. **分析结果，如果有问题则修改代码重复 3-5**
+7. **跑 full 16 cases**
+8. **做 P0-4 stability 采样（repeat 3）**
+9. **更新 report 模板、SKILL.md、DEV_LOG.md**
+10. **最终 commit + push**
 
 ## 关键注意事项
 
 - **不要**用 `requestAnimationFrame`，headless Chromium 里不触发，必须用 `setInterval`
 - **不要**重新引入 mic mute + resetForMeasurement（D13 的核心就是去掉它）
 - `user_kpi_ms=0` 是合法值（Python falsy 坑），必须用 `is not None` 判断
-- 跑测试前确保 token_server 在 `http://127.0.0.1:9090/api/token` 可达
-- WAV 文件在 `tools/autortc/cases/` 下的 json 里引用，路径相对于项目根目录
+- Token server 在 GPU 服务器上 `http://127.0.0.1:9090/api/token`
+- WAV 文件路径相对于 `/workspace/project 1/25/`
 - 每个 case 之间等 10-15s 让 LiveKit Agent 进程池回收
+- SSH 命令中路径有空格，必须用引号：`"/workspace/project 1/25/"`
 
 ## 完成后
 
