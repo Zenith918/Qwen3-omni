@@ -32,3 +32,4 @@ output/
 
 # Workspace-specific
 tmp/
+vllm-omni/
