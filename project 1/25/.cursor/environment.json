@@ -1,0 +1,6 @@
+{
+  "snapshot": "POPULATED_FROM_SETTINGS",
+  "install": "pip install numpy requests livekit livekit-api playwright && playwright install chromium && playwright install-deps chromium",
+  "start": "",
+  "terminals": []
+}
