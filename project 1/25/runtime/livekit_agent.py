@@ -41,6 +41,8 @@ from livekit.plugins import silero as silero_plugin
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "clients"))
 
+from noise_robust_vad import NoiseRobustVAD
+
 logger = logging.getLogger("voice-agent")
 logging.basicConfig(level=logging.INFO)
 
@@ -62,20 +64,26 @@ MIN_ENDPOINTING = float(os.environ.get("MIN_ENDPOINTING", "0.3"))
 MODE = os.environ.get("MODE", "turn_taking")
 
 # D15 P0-3: Dual VAD — separate endpointing and barge-in configuration
-#   Endpointing: conservative, long silence before declaring end-of-speech
-#   Barge-in: sensitive but with anti-noise thresholds
-ENDPOINTING_MIN_SILENCE_MS = int(os.environ.get("ENDPOINTING_MIN_SILENCE_MS",
-    "1200" if MODE == "turn_taking" else "300"))
+#   VAD_SILENCE_MS: minimum silence at VAD level to emit END_OF_SPEECH (pause protection)
+#   ENDPOINTING_DELAY_MS: additional pipeline-level delay after VAD END_OF_SPEECH
+#   Total endpointing delay = VAD_SILENCE_MS + ENDPOINTING_DELAY_MS
+VAD_ENDPOINTING_SILENCE_MS = int(os.environ.get("VAD_ENDPOINTING_SILENCE_MS",
+    "500" if MODE == "turn_taking" else "200"))
+ENDPOINTING_DELAY_MS = int(os.environ.get("ENDPOINTING_DELAY_MS",
+    "300" if MODE == "turn_taking" else "100"))
 BARGEIN_MIN_SPEECH_MS = int(os.environ.get("BARGEIN_MIN_SPEECH_MS", "120"))
 BARGEIN_ACTIVATION_THRESHOLD = float(os.environ.get("BARGEIN_ACTIVATION_THRESHOLD",
     "0.7" if MODE == "turn_taking" else "0.5"))
+NOISE_GATE_ENABLED = os.environ.get("NOISE_GATE_ENABLED",
+    "1" if MODE == "turn_taking" else "0") == "1"
 
-# D14 compat: TURN_TAKING_MIN_SILENCE_MS still works as override
+# D14 compat: TURN_TAKING_MIN_SILENCE_MS still works as override (sets total delay)
 TURN_TAKING_MIN_SILENCE_MS = int(os.environ.get("TURN_TAKING_MIN_SILENCE_MS", "0"))
 if TURN_TAKING_MIN_SILENCE_MS > 0:
-    ENDPOINTING_MIN_SILENCE_MS = TURN_TAKING_MIN_SILENCE_MS
+    VAD_ENDPOINTING_SILENCE_MS = max(200, TURN_TAKING_MIN_SILENCE_MS // 2)
+    ENDPOINTING_DELAY_MS = TURN_TAKING_MIN_SILENCE_MS - VAD_ENDPOINTING_SILENCE_MS
 
-MIN_ENDPOINTING = ENDPOINTING_MIN_SILENCE_MS / 1000.0
+MIN_ENDPOINTING = ENDPOINTING_DELAY_MS / 1000.0
 
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "150"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
@@ -607,17 +615,20 @@ class QwenVoiceAgent(Agent):
         # D7: 让 STT 能在 recognize 开始时 propagate trace_id 给 LLM/TTS
         self._stt_instance.set_siblings(self._llm_instance, self._tts_instance)
 
+        inner_vad = silero_plugin.VAD.load(
+            min_silence_duration=VAD_ENDPOINTING_SILENCE_MS / 1000.0,
+            prefix_padding_duration=VAD_PREFIX_MS / 1000.0,
+            min_speech_duration=BARGEIN_MIN_SPEECH_MS / 1000.0,
+            activation_threshold=BARGEIN_ACTIVATION_THRESHOLD,
+        )
+        vad_instance = NoiseRobustVAD(inner_vad, noise_gate_enabled=NOISE_GATE_ENABLED)
+
         super().__init__(
             instructions="你是一个友好的语音助手。用中文回复，自然口语化。注意结合对话上下文。",
             stt=self._stt_instance,
             llm=self._llm_instance,
             tts=self._tts_instance,
-            vad=silero_plugin.VAD.load(
-                min_silence_duration=ENDPOINTING_MIN_SILENCE_MS / 1000.0,
-                prefix_padding_duration=VAD_PREFIX_MS / 1000.0,
-                min_speech_duration=BARGEIN_MIN_SPEECH_MS / 1000.0,
-                activation_threshold=BARGEIN_ACTIVATION_THRESHOLD,
-            ),
+            vad=vad_instance,
             allow_interruptions=(MODE == "duplex"),
             min_endpointing_delay=MIN_ENDPOINTING,
             max_endpointing_delay=2.0 if MODE == "turn_taking" else 1.5,
@@ -768,11 +779,13 @@ async def entrypoint(ctx):
 if __name__ == "__main__":
     from livekit.agents import cli
 
-    logger.info(f"[Config] MODE={MODE} ENDP_SILENCE={ENDPOINTING_MIN_SILENCE_MS}ms "
+    logger.info(f"[Config] MODE={MODE} "
+                f"VAD_SILENCE={VAD_ENDPOINTING_SILENCE_MS}ms ENDP_DELAY={ENDPOINTING_DELAY_MS}ms "
+                f"(total={VAD_ENDPOINTING_SILENCE_MS + ENDPOINTING_DELAY_MS}ms) "
                 f"BARGEIN_MIN_SPEECH={BARGEIN_MIN_SPEECH_MS}ms "
                 f"BARGEIN_THRESH={BARGEIN_ACTIVATION_THRESHOLD} "
-                f"FRAME={TTS_FRAME_MS}ms CONT={ENABLE_CONTINUATION} "
-                f"TOKENS={LLM_MAX_TOKENS} HIST={LLM_HISTORY_TURNS}")
+                f"NOISE_GATE={NOISE_GATE_ENABLED} "
+                f"FRAME={TTS_FRAME_MS}ms CONT={ENABLE_CONTINUATION}")
 
     cli.run_app(
         WorkerOptions(

@@ -1,0 +1,106 @@
+{
+  "grid_results": [
+    {
+      "config": {
+        "VAD_ENDPOINTING_SILENCE_MS": "300",
+        "ENDPOINTING_DELAY_MS": "300",
+        "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+        "BARGEIN_MIN_SPEECH_MS": "120",
+        "NOISE_GATE_ENABLED": "1"
+      },
+      "label": "vs300_ed300_th0.7_sp120_ng1",
+      "valid": true,
+      "gt_tt_p95_median": 1428.2,
+      "gt_tt_p95_max": 1428.2,
+      "total_to_gt": 1,
+      "to_rate": 0.25,
+      "total_cases": 4,
+      "repeats": 1
+    },
+    {
+      "config": {
+        "VAD_ENDPOINTING_SILENCE_MS": "400",
+        "ENDPOINTING_DELAY_MS": "400",
+        "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+        "BARGEIN_MIN_SPEECH_MS": "120",
+        "NOISE_GATE_ENABLED": "1"
+      },
+      "label": "vs400_ed400_th0.7_sp120_ng1",
+      "valid": true,
+      "gt_tt_p95_median": 1584.3,
+      "gt_tt_p95_max": 1584.3,
+      "total_to_gt": 0,
+      "to_rate": 0.0,
+      "total_cases": 4,
+      "repeats": 1
+    },
+    {
+      "config": {
+        "VAD_ENDPOINTING_SILENCE_MS": "500",
+        "ENDPOINTING_DELAY_MS": "300",
+        "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+        "BARGEIN_MIN_SPEECH_MS": "120",
+        "NOISE_GATE_ENABLED": "1"
+      },
+      "label": "vs500_ed300_th0.7_sp120_ng1",
+      "valid": true,
+      "gt_tt_p95_median": 1569.5,
+      "gt_tt_p95_max": 1569.5,
+      "total_to_gt": 0,
+      "to_rate": 0.0,
+      "total_cases": 4,
+      "repeats": 1
+    },
+    {
+      "config": {
+        "VAD_ENDPOINTING_SILENCE_MS": "600",
+        "ENDPOINTING_DELAY_MS": "600",
+        "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+        "BARGEIN_MIN_SPEECH_MS": "120",
+        "NOISE_GATE_ENABLED": "1"
+      },
+      "label": "vs600_ed600_th0.7_sp120_ng1",
+      "valid": true,
+      "gt_tt_p95_median": 1668.85,
+      "gt_tt_p95_max": 1668.85,
+      "total_to_gt": 0,
+      "to_rate": 0.0,
+      "total_cases": 4,
+      "repeats": 1
+    },
+    {
+      "config": {
+        "VAD_ENDPOINTING_SILENCE_MS": "400",
+        "ENDPOINTING_DELAY_MS": "400",
+        "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+        "BARGEIN_MIN_SPEECH_MS": "120",
+        "NOISE_GATE_ENABLED": "0"
+      },
+      "label": "vs400_ed400_th0.7_sp120_ng0",
+      "valid": true,
+      "gt_tt_p95_median": 1586.35,
+      "gt_tt_p95_max": 1586.35,
+      "total_to_gt": 0,
+      "to_rate": 0.0,
+      "total_cases": 4,
+      "repeats": 1
+    }
+  ],
+  "optimal": {
+    "config": {
+      "VAD_ENDPOINTING_SILENCE_MS": "500",
+      "ENDPOINTING_DELAY_MS": "300",
+      "BARGEIN_ACTIVATION_THRESHOLD": "0.7",
+      "BARGEIN_MIN_SPEECH_MS": "120",
+      "NOISE_GATE_ENABLED": "1"
+    },
+    "label": "vs500_ed300_th0.7_sp120_ng1",
+    "valid": true,
+    "gt_tt_p95_median": 1569.5,
+    "gt_tt_p95_max": 1569.5,
+    "total_to_gt": 0,
+    "to_rate": 0.0,
+    "total_cases": 4,
+    "repeats": 1
+  }
+}

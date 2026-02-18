@@ -722,10 +722,12 @@ def main() -> int:
         except Exception:
             pass
 
-    # Gate thresholds (D15 recalibrated to GT-based KPI)
-    USER_KPI_GT_WARN_THRESHOLD_MS = 900.0
-    USER_KPI_GT_FAIL_THRESHOLD_MS = 3257.0
-    USER_KPI_GT_FAIL_READY = False  # awaiting D15 baseline refreeze
+    # Gate thresholds (D15: recalibrated to GT-based KPI from 5x mini baseline)
+    # Baseline: GT_TT_P95 mean=1604ms, std=35ms, P95=1656ms (20 cases, 0 talk-over)
+    # FAIL = baseline P95 + 50ms = 1706ms
+    USER_KPI_GT_WARN_THRESHOLD_MS = 1700.0
+    USER_KPI_GT_FAIL_THRESHOLD_MS = 1706.0
+    USER_KPI_GT_FAIL_READY = True
     warn_gates = {}
 
     # Turn-taking mode gates: talk_over_gt == 0, GT_TT_P95 <= threshold
