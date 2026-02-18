@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "case_id": "duplex_interrupt_once",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav",
+      "tier": "P0",
+      "mode": "duplex",
+      "note": "Basic barge-in: user interrupts agent mid-reply"
+    },
+    {
+      "case_id": "duplex_interrupt_twice",
+      "wav": "/workspace/project 1/25/output/day2_reply.wav",
+      "tier": "P0",
+      "mode": "duplex",
+      "note": "Double barge-in: user interrupts agent twice"
+    },
+    {
+      "case_id": "duplex_noise_bargein",
+      "wav": "/workspace/project 1/25/output/day1_test_input.wav",
+      "tier": "P0",
+      "mode": "duplex",
+      "note": "Barge-in under noise: verify noise filtering doesn't suppress real speech"
+    },
+    {
+      "case_id": "duplex_long_overlap",
+      "wav": "/workspace/project 1/25/output/autortc_cases/long_fast.wav",
+      "tier": "P1",
+      "mode": "duplex",
+      "note": "Long overlap scenario: user speaks while agent is replying"
+    }
+  ]
+}

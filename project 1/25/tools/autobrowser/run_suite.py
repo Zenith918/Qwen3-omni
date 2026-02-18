@@ -756,10 +756,10 @@ def main() -> int:
 
 
 def _write_report(report_path: str, summary: dict, net_profile: str):
-    """Generate markdown report (D15: GT KPI as primary)."""
+    """Generate markdown report (D16: GT KPI + adaptive endpointing)."""
     ensure_parent(report_path)
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoBrowser Report (D15)\n\n")
+        f.write("# AutoBrowser Report (D16)\n\n")
 
         # D15 P0-1: PRIMARY — GT-based Turn-taking KPI
         f.write("## USER_KPI_GT Turn-taking (is_talk_over_gt=false)\n\n")

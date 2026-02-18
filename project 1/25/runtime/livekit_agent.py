@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "clients"))
 
 from noise_robust_vad import NoiseRobustVAD
+from endpointing_controller import EndpointingController
 
 logger = logging.getLogger("voice-agent")
 logging.basicConfig(level=logging.INFO)
@@ -63,14 +64,16 @@ MIN_ENDPOINTING = float(os.environ.get("MIN_ENDPOINTING", "0.3"))
 # D15 P0-2: Mode-based configuration (turn_taking or duplex)
 MODE = os.environ.get("MODE", "turn_taking")
 
-# D15 P0-3: Dual VAD — separate endpointing and barge-in configuration
-#   VAD_SILENCE_MS: minimum silence at VAD level to emit END_OF_SPEECH (pause protection)
-#   ENDPOINTING_DELAY_MS: additional pipeline-level delay after VAD END_OF_SPEECH
-#   Total endpointing delay = VAD_SILENCE_MS + ENDPOINTING_DELAY_MS
+# D16 P0-2: Adaptive endpointing — lower base values, controller adds dynamic hold
+#   VAD_ENDPOINTING_SILENCE_MS: base VAD silence (lowered from 500→300 for fast path)
+#   ENDPOINTING_DELAY_MS: pipeline-level delay after VAD END_OF_SPEECH
+#   EndpointingController adds 0-300ms extra hold based on SNR/utterance
 VAD_ENDPOINTING_SILENCE_MS = int(os.environ.get("VAD_ENDPOINTING_SILENCE_MS",
-    "500" if MODE == "turn_taking" else "200"))
+    "300" if MODE == "turn_taking" else "200"))
 ENDPOINTING_DELAY_MS = int(os.environ.get("ENDPOINTING_DELAY_MS",
-    "300" if MODE == "turn_taking" else "100"))
+    "200" if MODE == "turn_taking" else "100"))
+ADAPTIVE_ENDPOINTING = os.environ.get("ADAPTIVE_ENDPOINTING",
+    "1" if MODE == "turn_taking" else "0") == "1"
 BARGEIN_MIN_SPEECH_MS = int(os.environ.get("BARGEIN_MIN_SPEECH_MS", "120"))
 BARGEIN_ACTIVATION_THRESHOLD = float(os.environ.get("BARGEIN_ACTIVATION_THRESHOLD",
     "0.7" if MODE == "turn_taking" else "0.5"))
@@ -621,7 +624,17 @@ class QwenVoiceAgent(Agent):
             min_speech_duration=BARGEIN_MIN_SPEECH_MS / 1000.0,
             activation_threshold=BARGEIN_ACTIVATION_THRESHOLD,
         )
-        vad_instance = NoiseRobustVAD(inner_vad, noise_gate_enabled=NOISE_GATE_ENABLED)
+        # D16 P0-2: Adaptive endpointing controller
+        ep_controller = None
+        if ADAPTIVE_ENDPOINTING:
+            ep_controller = EndpointingController()
+            logger.info("[Agent] EndpointingController enabled (adaptive hold)")
+        self._ep_controller = ep_controller
+        vad_instance = NoiseRobustVAD(
+            inner_vad,
+            noise_gate_enabled=NOISE_GATE_ENABLED,
+            endpointing_controller=ep_controller,
+        )
 
         super().__init__(
             instructions="你是一个友好的语音助手。用中文回复，自然口语化。注意结合对话上下文。",
@@ -672,6 +685,10 @@ class QwenVoiceAgent(Agent):
         _tracer.mark(tid, "_user_text_ready")
         if tid in _tracer._traces:
             _tracer._traces[tid]["user_text"] = text
+            # D16 P0-3: Record endpointing params used for this turn
+            if self._ep_controller and self._ep_controller.last_decision:
+                _tracer._traces[tid]["endpointing_params"] = \
+                    self._ep_controller.last_decision.to_dict()
 
         # 重置，下一轮 STT 会创建新的
         self._stt_instance._current_trace_id = None
@@ -781,7 +798,8 @@ if __name__ == "__main__":
 
     logger.info(f"[Config] MODE={MODE} "
                 f"VAD_SILENCE={VAD_ENDPOINTING_SILENCE_MS}ms ENDP_DELAY={ENDPOINTING_DELAY_MS}ms "
-                f"(total={VAD_ENDPOINTING_SILENCE_MS + ENDPOINTING_DELAY_MS}ms) "
+                f"(base_total={VAD_ENDPOINTING_SILENCE_MS + ENDPOINTING_DELAY_MS}ms) "
+                f"ADAPTIVE={ADAPTIVE_ENDPOINTING} "
                 f"BARGEIN_MIN_SPEECH={BARGEIN_MIN_SPEECH_MS}ms "
                 f"BARGEIN_THRESH={BARGEIN_ACTIVATION_THRESHOLD} "
                 f"NOISE_GATE={NOISE_GATE_ENABLED} "

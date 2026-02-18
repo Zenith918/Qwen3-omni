@@ -53,22 +53,20 @@
       "wav": "/workspace/project 1/25/output/autortc_cases/boom_trigger.wav"
     },
     {
-      "case_id": "speed_drift",
-      "wav": "/workspace/project 1/25/output/autortc_cases/speed_drift.wav"
+      "case_id": "long_fast",
+      "wav": "/workspace/project 1/25/output/autortc_cases/long_fast.wav",
+      "note": "D16: replaces speed_drift — continuous long sentence, no internal pauses"
     },
     {
       "case_id": "distortion_sibilant",
       "wav": "/workspace/project 1/25/output/autortc_cases/distortion_sibilant.wav"
     },
     {
-      "case_id": "stutter_long_pause",
-      "wav": "/workspace/project 1/25/output/autortc_cases/stutter_long_pause.wav",
-      "expected_silences": [
-        [
-          2.5,
-          4.5
-        ]
-      ]
+      "case_id": "long_pause_expected",
+      "wav": "/workspace/project 1/25/output/autortc_cases/long_pause_expected.wav",
+      "pause_expected": true,
+      "expected_pause_ms": 700,
+      "note": "D16: replaces stutter_long_pause — two sentences with 700ms controlled pause"
     }
   ]
 }

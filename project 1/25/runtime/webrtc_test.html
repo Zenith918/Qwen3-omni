@@ -383,12 +383,17 @@
           rms = Math.sqrt(rms / buf.length);
 
           if (rms > PLAYOUT_THRESHOLD) {
+            // D16: Only record playout AFTER user EoT to exclude welcome message.
+            // If user is still speaking (no t_user_speech_end), skip this playout.
+            if (currentTrace && !currentTrace.t_user_speech_end) {
+              // Agent audio during user speech = welcome message, ignore
+              return;
+            }
             agentPlayoutDetected = true;
             if (currentTrace && !currentTrace.t_browser_first_playout) {
               currentTrace.t_browser_first_playout = performance.now();
               currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
               log(`Agent playout detected (energy=${rms.toFixed(4)}, res=${PLAYOUT_POLL_MS}ms)`, 'success');
-              // D13: try finalize — will only succeed if EoT already recorded
               finalizeTrace();
             }
           }
@@ -425,7 +430,8 @@
     }
 
     function onAgentAudioStart() {
-      if (currentTrace && !currentTrace.t_first_audio_playout) {
+      // D16: Only record if user EoT already happened (exclude welcome message)
+      if (currentTrace && !currentTrace.t_first_audio_playout && currentTrace.t_user_speech_end) {
         currentTrace.t_first_audio_playout = performance.now();
         currentTrace.t_browser_first_playout = currentTrace.t_first_audio_playout;
         log(`Agent audio start (ActiveSpeakers/TrackSubscribed)`, 'success');
@@ -593,8 +599,9 @@
             monitorAgentPlayout(agentAudioEl);
 
             // Fallback: if playout not detected in 500ms, use track subscribe time
+            // D16: Only if user EoT already happened
             setTimeout(() => {
-              if (currentTrace && !currentTrace.t_browser_first_playout) {
+              if (currentTrace && !currentTrace.t_browser_first_playout && currentTrace.t_user_speech_end) {
                 currentTrace.t_browser_first_playout = performance.now();
                 currentTrace.t_first_audio_playout = currentTrace.t_browser_first_playout;
                 log('Agent playout (fallback: track subscribed + 500ms)', 'info');

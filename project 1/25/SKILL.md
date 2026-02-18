@@ -1030,3 +1030,38 @@ GT EoT 通过离线分析输入 WAV 的能量得到真实语音结束时间，�
 5. 写入 `optimal_env.sh`（直接 source 使用）
 
 选完后用 `freeze_d15_baseline.sh` 冻结基线。
+
+### 15.16 D16 自适应端点检测架构
+
+**问题**：固定 800ms 端点延迟导致 GT_TT_P95 过高 (~1600ms)，但降低延迟会增加噪声场景的 talk-over 风险。
+
+**解决方案**：三层端点检测栈:
+1. **VAD 层** (300ms fixed): Silero VAD 最小静默，快速基础检测
+2. **自适应 hold 层** (0-300ms dynamic): EndpointingController 基于 SNR/语句长度动态决定
+3. **Pipeline 层** (200ms fixed): LiveKit min_endpointing_delay 最终缓冲
+
+**EndpointingController 决策规则**:
+- SNR >= 15dB 且语句 < 2s → 0ms hold（快速路径，总 500ms）
+- SNR >= 15dB 且语句 >= 2s → 100ms hold（中等，总 600ms）
+- SNR < 15dB → 300ms hold（保守，总 800ms = 与 D15 相同）
+
+**关键**: 干净语音获得 300ms 提速，噪声场景保持原有保护。
+
+### 15.17 Welcome 消息 Playout 陷阱
+
+**现象**: agent welcome 消息（"你好，我是语音助手"）在用户说话期间播放，被浏览器 playout 检测捕获，导致所有 case 显示为 talk-over。
+
+**根因**: `monitorAgentPlayout` 在 `agentPlayoutDetected=false` 时检测到任何音频能量就设置 `t_browser_first_playout`。如果 TrackSubscribed 事件在用户开始说话之后到达（race condition），welcome 音频会被错误计入当前 trace。
+
+**修复**: 仅在 `t_user_speech_end` 已记录后才允许设置 `t_browser_first_playout`。这确保只有 agent 的回复（而非欢迎语）被计入 KPI。
+
+### 15.18 测试用例设计原则
+
+**避免的模式**:
+- WAV 几乎填满整个文件（如原 speed_drift，仅 10ms 尾静音）→ Chromium 循环必然 talk-over
+- 内部停顿 > VAD silence + pipeline delay → 必然触发假 endpoint
+
+**推荐做法**:
+- 确保 WAV 有 >= 500ms 尾静音
+- 内部停顿控制在 VAD silence 阈值以内（当前 300ms + buffer = ~600ms）
+- 需要测试长停顿 → 使用 `pause_expected` 标注

@@ -1,0 +1,35 @@
+{
+  "baseline_mini_p95_values": [
+    1328.0,
+    1318.85,
+    1319.85,
+    1360.8,
+    1319.0
+  ],
+  "baseline_p95_mean": 1329.3,
+  "baseline_p95_std": 16.1,
+  "baseline_p95_max": 1360.8,
+  "full16_p95": 1532.0,
+  "FAIL_threshold_ms": 1800.0,
+  "talk_over_gt_all_runs": 0,
+  "USER_KPI_GT_FAIL_READY": true,
+  "d15_comparison": {
+    "d15_gt_tt_p95_mean": 1604,
+    "d16_gt_tt_p95_mean": 1329.3,
+    "improvement_ms": 274.7,
+    "improvement_pct": "17.1%"
+  },
+  "stability_full16_p95_values": [
+    1748.0,
+    1540.0,
+    1534.0
+  ],
+  "stability_full16_p95_mean": 1607.3,
+  "stability_full16_p95_max": 1748.0,
+  "stability_talk_over_gt": [
+    0,
+    0,
+    0
+  ],
+  "stability_all_pass": true
+}

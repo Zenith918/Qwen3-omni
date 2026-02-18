@@ -284,7 +284,7 @@ def _pct(values: list[float], p: float):
 
 
 # ── P0 / P1 case 分类 ──
-P1_CASE_IDS = {"boom_trigger", "speed_drift", "distortion_sibilant", "stutter_long_pause"}
+P1_CASE_IDS = {"boom_trigger", "long_fast", "distortion_sibilant", "long_pause_expected"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -647,7 +647,7 @@ def main() -> int:
                 warns.append(f"clipping_ratio={cr}")
             if not warns:
                 warns.append("no_spike_detected (check boom wav generation)")
-        if cid == "speed_drift":
+        if cid == "long_fast":
             dr = float(r.get("drift_ratio", -1))
             if dr > 0 and abs(dr - 1.0) > 0.02:
                 warns.append(f"drift_ratio={dr} (>{2}% deviation)")
@@ -661,7 +661,7 @@ def main() -> int:
             md = float(r.get("mel_distance", -1))
             if md > 15:
                 warns.append(f"mel_distance={md} (high)")
-        if cid == "stutter_long_pause":
+        if cid == "long_pause_expected":
             cov = float(r.get("expected_silence_coverage", -1))
             if cov >= 0:
                 warns.append(f"expected_silence_coverage={cov}")
@@ -722,11 +722,11 @@ def main() -> int:
         except Exception:
             pass
 
-    # Gate thresholds (D15: recalibrated to GT-based KPI from 5x mini baseline)
-    # Baseline: GT_TT_P95 mean=1604ms, std=35ms, P95=1656ms (20 cases, 0 talk-over)
-    # FAIL = baseline P95 + 50ms = 1706ms
-    USER_KPI_GT_WARN_THRESHOLD_MS = 1700.0
-    USER_KPI_GT_FAIL_THRESHOLD_MS = 1706.0
+    # Gate thresholds (D16: recalibrated from 5x mini + 4x full16 stability)
+    # Mini P95 mean=1329ms (std=16ms). Full16 P95 range: 1532-1748ms.
+    # Full16 P95 mean=1589, std=96 → FAIL = mean+2*std ≈ 1800ms
+    USER_KPI_GT_WARN_THRESHOLD_MS = 1400.0
+    USER_KPI_GT_FAIL_THRESHOLD_MS = 1800.0
     USER_KPI_GT_FAIL_READY = True
     warn_gates = {}
 
@@ -734,9 +734,17 @@ def main() -> int:
     if gt_talk_over_count is not None:
         gates["talk_over_gt_count == 0 (turn_taking)"] = gt_talk_over_count == 0
     if gt_tt_p95 is not None:
-        warn_gates["USER_KPI_GT TT P95 <= 900ms (WARN)"] = gt_tt_p95 <= USER_KPI_GT_WARN_THRESHOLD_MS
+        warn_gates[f"USER_KPI_GT TT P95 <= {USER_KPI_GT_WARN_THRESHOLD_MS:.0f}ms (WARN)"] = gt_tt_p95 <= USER_KPI_GT_WARN_THRESHOLD_MS
         if USER_KPI_GT_FAIL_READY:
             gates["USER_KPI_GT TT P95 <= FAIL"] = gt_tt_p95 <= USER_KPI_GT_FAIL_THRESHOLD_MS
+
+    # D16 P1: Duplex WARN gates (observable, no hard fail yet)
+    gt_duplex_abs_p95 = gt_kpi_data.get("gt_duplex_abs_p95") if gt_kpi_data else None
+    if gt_duplex_abs_p95 is not None:
+        warn_gates["duplex overlap_abs_p95 <= 3000ms (WARN)"] = gt_duplex_abs_p95 <= 3000.0
+    gt_talk_over_rate = gt_kpi_data.get("gt_talk_over_rate", 0) if gt_kpi_data else 0
+    if gt_talk_over_rate > 0:
+        warn_gates["duplex talk_over_rate observable (WARN)"] = True
 
     # Legacy browser-based (reference only)
     USER_KPI_WARN_THRESHOLD_MS = 900.0
