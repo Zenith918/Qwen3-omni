@@ -699,24 +699,53 @@ def main() -> int:
         except Exception:
             pass
 
-    # D13 P0-4: USER_KPI WARN gate (prepare for FAIL upgrade)
-    # Current: WARN only. After stability sampling, set FAIL threshold = baseline_P95 + 50ms
-    USER_KPI_WARN_THRESHOLD_MS = 900.0
-    # D14 P0-4: FAIL threshold from 5x mini turn-taking subset:
-    # baseline TT P95 = 3207ms (19 data points, high variance from interrupt cases)
-    # FAIL = P95 + 50 = 3257ms (conservative, based on small sample)
-    # Set FAIL_READY = True after 20+ case validation
-    USER_KPI_FAIL_THRESHOLD_MS = 3257.0
-    USER_KPI_FAIL_READY = True
+    # D15 P0-1/P0-2: GT-based USER_KPI gates (mode-aware)
+    gt_kpi_data = {}
+    gt_tt_p95 = None
+    gt_talk_over_count = 0
+    if args.autobrowser_summary and os.path.exists(args.autobrowser_summary):
+        try:
+            ab = _read_json(args.autobrowser_summary)
+            gt_kpi_data = {
+                "gt_kpi_raw_p50": ab.get("gt_kpi_raw_p50_ms"),
+                "gt_kpi_raw_p95": ab.get("gt_kpi_raw_p95_ms"),
+                "gt_tt_p50": ab.get("gt_tt_p50_ms"),
+                "gt_tt_p95": ab.get("gt_tt_p95_ms"),
+                "gt_tt_count": ab.get("gt_tt_count", 0),
+                "gt_talk_over_count": ab.get("talk_over_gt_count", 0),
+                "gt_talk_over_rate": ab.get("gt_talk_over_rate", 0),
+                "eot_lag_p50": ab.get("browser_eot_lag_p50_ms"),
+                "eot_lag_p95": ab.get("browser_eot_lag_p95_ms"),
+            }
+            gt_tt_p95 = gt_kpi_data.get("gt_tt_p95")
+            gt_talk_over_count = gt_kpi_data.get("gt_talk_over_count", 0)
+        except Exception:
+            pass
+
+    # Gate thresholds (D15 recalibrated to GT-based KPI)
+    USER_KPI_GT_WARN_THRESHOLD_MS = 900.0
+    USER_KPI_GT_FAIL_THRESHOLD_MS = 3257.0
+    USER_KPI_GT_FAIL_READY = False  # awaiting D15 baseline refreeze
     warn_gates = {}
+
+    # Turn-taking mode gates: talk_over_gt == 0, GT_TT_P95 <= threshold
+    if gt_talk_over_count is not None:
+        gates["talk_over_gt_count == 0 (turn_taking)"] = gt_talk_over_count == 0
+    if gt_tt_p95 is not None:
+        warn_gates["USER_KPI_GT TT P95 <= 900ms (WARN)"] = gt_tt_p95 <= USER_KPI_GT_WARN_THRESHOLD_MS
+        if USER_KPI_GT_FAIL_READY:
+            gates["USER_KPI_GT TT P95 <= FAIL"] = gt_tt_p95 <= USER_KPI_GT_FAIL_THRESHOLD_MS
+
+    # Legacy browser-based (reference only)
+    USER_KPI_WARN_THRESHOLD_MS = 900.0
     if user_kpi_p95 is not None:
-        warn_gates["USER_KPI P95 <= 900ms (WARN)"] = user_kpi_p95 <= USER_KPI_WARN_THRESHOLD_MS
-        if USER_KPI_FAIL_READY:
-            gates["USER_KPI P95 <= 760ms"] = user_kpi_p95 <= USER_KPI_FAIL_THRESHOLD_MS
+        warn_gates["(ref) browser KPI P95 <= 900ms"] = user_kpi_p95 <= USER_KPI_WARN_THRESHOLD_MS
 
     # Write USER_KPI into summary
     summary["USER_KPI_P95_MS"] = user_kpi_p95
+    summary["USER_KPI_GT_TT_P95_MS"] = gt_tt_p95
     summary["USER_KPI_DATA"] = user_kpi_data
+    summary["USER_KPI_GT_DATA"] = gt_kpi_data
     summary_path = os.path.join(args.output_dir, "summary.json")
     try:
         with open(summary_path, "w", encoding="utf-8") as sf:

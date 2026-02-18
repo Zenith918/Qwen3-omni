@@ -996,3 +996,37 @@ TURN_TAKING_MIN_SILENCE_MS 不是越大越好：
 - 太大 (1200ms) → 延迟增加但 talk-over 减少
 - noise_background 始终 talk-over → 是输入信号问题，不是阈值问题
 - 单次运行方差大，结论需 3+ runs 交叉验证
+
+### 15.13 D15 USER_KPI_GT 口径升级原则
+
+**为什么不用浏览器 EoT？**
+浏览器 EoT 依赖 SILENCE_TIMEOUT_MS（AUTO_MODE 下 1500ms），导致 USER_KPI 被人为抬高 ≈1300ms。
+GT EoT 通过离线分析输入 WAV 的能量得到真实语音结束时间，免疫测量膨胀。
+
+- `user_kpi_gt_raw_ms = t_browser_first_playout - t_user_eot_gt`
+- 旧 `user_kpi_raw_ms` 保留但仅作参考，不用于 gate
+- `eot_lag_ms` 作为诊断指标，监控浏览器 EoT 检测的延迟
+
+### 15.14 D15 MODE 模式分离设计
+
+两种模式用不同的策略和 gate：
+- **turn_taking** (默认): `allow_interruptions=False`, endpointing 保守 (1200ms), activation_threshold 高 (0.7)
+  - Gate: `talk_over_gt_count == 0`, `GT_TT_P95 <= threshold`
+- **duplex**: `allow_interruptions=True`, endpointing 快 (300ms), activation_threshold 低 (0.5)
+  - Gate: WARN only, 监控 overlap 指标
+
+关键：endpointing 和 barge-in 不共享阈值！
+- `ENDPOINTING_MIN_SILENCE_MS` 控制何时判定用户说完
+- `BARGEIN_MIN_SPEECH_MS` 控制多短的声音才算"打断"（抗噪）
+- `BARGEIN_ACTIVATION_THRESHOLD` 控制 VAD 灵敏度（高=保守=抗噪）
+
+### 15.15 D15 自动参数搜索范式
+
+手工矩阵不可扩展，`run_endpointing_grid.py` 自动化：
+1. 定义参数网格（9+ 组合）
+2. 每组 4 case × 3 repeats（抗方差）
+3. 输出 Pareto 表 (talk_over_rate vs GT_TT_P95)
+4. 自动选出 TO=0 且 P95 最小的配置
+5. 写入 `optimal_env.sh`（直接 source 使用）
+
+选完后用 `freeze_d15_baseline.sh` 冻结基线。

@@ -57,10 +57,25 @@ TTS_FRAME_MS = int(os.environ.get("TTS_FRAME_MS", "20"))
 VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "200"))
 VAD_PREFIX_MS = int(os.environ.get("VAD_PREFIX_MS", "300"))
 MIN_ENDPOINTING = float(os.environ.get("MIN_ENDPOINTING", "0.3"))
-# D14 P0-3: Turn-taking minimum silence knob (ms) — overrides MIN_ENDPOINTING if set
+
+# D15 P0-2: Mode-based configuration (turn_taking or duplex)
+MODE = os.environ.get("MODE", "turn_taking")
+
+# D15 P0-3: Dual VAD — separate endpointing and barge-in configuration
+#   Endpointing: conservative, long silence before declaring end-of-speech
+#   Barge-in: sensitive but with anti-noise thresholds
+ENDPOINTING_MIN_SILENCE_MS = int(os.environ.get("ENDPOINTING_MIN_SILENCE_MS",
+    "1200" if MODE == "turn_taking" else "300"))
+BARGEIN_MIN_SPEECH_MS = int(os.environ.get("BARGEIN_MIN_SPEECH_MS", "120"))
+BARGEIN_ACTIVATION_THRESHOLD = float(os.environ.get("BARGEIN_ACTIVATION_THRESHOLD",
+    "0.7" if MODE == "turn_taking" else "0.5"))
+
+# D14 compat: TURN_TAKING_MIN_SILENCE_MS still works as override
 TURN_TAKING_MIN_SILENCE_MS = int(os.environ.get("TURN_TAKING_MIN_SILENCE_MS", "0"))
 if TURN_TAKING_MIN_SILENCE_MS > 0:
-    MIN_ENDPOINTING = TURN_TAKING_MIN_SILENCE_MS / 1000.0
+    ENDPOINTING_MIN_SILENCE_MS = TURN_TAKING_MIN_SILENCE_MS
+
+MIN_ENDPOINTING = ENDPOINTING_MIN_SILENCE_MS / 1000.0
 
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "150"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
@@ -598,14 +613,14 @@ class QwenVoiceAgent(Agent):
             llm=self._llm_instance,
             tts=self._tts_instance,
             vad=silero_plugin.VAD.load(
-                min_silence_duration=VAD_SILENCE_MS / 1000.0,
+                min_silence_duration=ENDPOINTING_MIN_SILENCE_MS / 1000.0,
                 prefix_padding_duration=VAD_PREFIX_MS / 1000.0,
-                min_speech_duration=0.05,
-                activation_threshold=0.5,
+                min_speech_duration=BARGEIN_MIN_SPEECH_MS / 1000.0,
+                activation_threshold=BARGEIN_ACTIVATION_THRESHOLD,
             ),
-            allow_interruptions=True,
+            allow_interruptions=(MODE == "duplex"),
             min_endpointing_delay=MIN_ENDPOINTING,
-            max_endpointing_delay=1.5,
+            max_endpointing_delay=2.0 if MODE == "turn_taking" else 1.5,
         )
         self._active_trace_id = None
 
@@ -753,8 +768,10 @@ async def entrypoint(ctx):
 if __name__ == "__main__":
     from livekit.agents import cli
 
-    logger.info(f"[Config] VAD={VAD_SILENCE_MS}ms FRAME={TTS_FRAME_MS}ms "
-                f"ENDP={MIN_ENDPOINTING}s CONT={ENABLE_CONTINUATION} "
+    logger.info(f"[Config] MODE={MODE} ENDP_SILENCE={ENDPOINTING_MIN_SILENCE_MS}ms "
+                f"BARGEIN_MIN_SPEECH={BARGEIN_MIN_SPEECH_MS}ms "
+                f"BARGEIN_THRESH={BARGEIN_ACTIVATION_THRESHOLD} "
+                f"FRAME={TTS_FRAME_MS}ms CONT={ENABLE_CONTINUATION} "
                 f"TOKENS={LLM_MAX_TOKENS} HIST={LLM_HISTORY_TURNS}")
 
     cli.run_app(

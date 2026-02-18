@@ -547,9 +547,14 @@ def main() -> int:
         # D14 P0-2: Extract GT EoT fields from the SAME best trace used for USER_KPI
         browser_eot_lag_ms = None
         is_talk_over_gt = None
+        # D15 P0-1: GT-based USER_KPI (primary metric)
+        user_kpi_gt_raw_ms = None
+        user_kpi_gt_clamped_ms = None
         if best:
             browser_eot_lag_ms = best.get("browser_eot_lag_ms")
             is_talk_over_gt = best.get("is_talk_over_gt")
+            user_kpi_gt_raw_ms = best.get("user_kpi_gt_raw_ms")
+            user_kpi_gt_clamped_ms = best.get("user_kpi_gt_clamped_ms")
 
         status = "PASS" if browser_result["ok"] else "FAIL"
         join_s = "Y" if browser_result["joined"] else "N"
@@ -572,6 +577,9 @@ def main() -> int:
             "user_kpi_raw_ms": user_kpi_raw_ms,
             "user_kpi_ms": user_kpi_clamped_ms,
             "is_talk_over": is_talk_over,
+            "user_kpi_gt_raw_ms": user_kpi_gt_raw_ms,
+            "user_kpi_gt_clamped_ms": user_kpi_gt_clamped_ms,
+            "is_talk_over_gt": is_talk_over_gt,
             "trace_id": trace_id,
             "room": case_room,
             "elapsed_s": elapsed,
@@ -580,7 +588,6 @@ def main() -> int:
             "browser_trace_count": len(traces),
             "gt_speech_end_ms": gt_speech_end_ms,
             "browser_eot_lag_ms": browser_eot_lag_ms,
-            "is_talk_over_gt": is_talk_over_gt,
         }
         summary["cases"].append(case_result)
 
@@ -674,6 +681,45 @@ def main() -> int:
     gt_to_count = sum(1 for c in summary["cases"] if c.get("is_talk_over_gt") is True)
     summary["talk_over_gt_count"] = gt_to_count
 
+    # D15 P0-1: GT-based USER_KPI aggregates (primary metric)
+    gt_raw_vals = [c["user_kpi_gt_raw_ms"] for c in summary["cases"]
+                   if c.get("user_kpi_gt_raw_ms") is not None]
+    if gt_raw_vals:
+        arr_gt = np.array(gt_raw_vals, dtype=np.float64)
+        summary["gt_kpi_raw_p50_ms"] = float(np.percentile(arr_gt, 50))
+        summary["gt_kpi_raw_p95_ms"] = float(np.percentile(arr_gt, 95))
+        summary["gt_kpi_raw_p99_ms"] = float(np.percentile(arr_gt, 99))
+        summary["gt_kpi_raw_min_ms"] = float(np.min(arr_gt))
+        summary["gt_kpi_raw_max_ms"] = float(np.max(arr_gt))
+        summary["gt_kpi_count"] = len(gt_raw_vals)
+
+    # D15: GT-based turn-taking subset (is_talk_over_gt=false)
+    gt_tt_raw = [c["user_kpi_gt_raw_ms"] for c in summary["cases"]
+                 if c.get("user_kpi_gt_raw_ms") is not None and not c.get("is_talk_over_gt")]
+    if gt_tt_raw:
+        arr_gt_tt = np.array(gt_tt_raw, dtype=np.float64)
+        summary["gt_tt_count"] = len(gt_tt_raw)
+        summary["gt_tt_p50_ms"] = float(np.percentile(arr_gt_tt, 50))
+        summary["gt_tt_p95_ms"] = float(np.percentile(arr_gt_tt, 95))
+        summary["gt_tt_p99_ms"] = float(np.percentile(arr_gt_tt, 99))
+        summary["gt_tt_min_ms"] = float(np.min(arr_gt_tt))
+        summary["gt_tt_max_ms"] = float(np.max(arr_gt_tt))
+    else:
+        summary["gt_tt_count"] = 0
+
+    # D15: GT-based duplex subset (is_talk_over_gt=true, abs values)
+    gt_to_raw = [abs(c["user_kpi_gt_raw_ms"]) for c in summary["cases"]
+                 if c.get("user_kpi_gt_raw_ms") is not None and c.get("is_talk_over_gt")]
+    summary["gt_talk_over_rate"] = gt_to_count / total if total > 0 else 0
+    if gt_to_raw:
+        arr_gt_to = np.array(gt_to_raw, dtype=np.float64)
+        summary["gt_duplex_count"] = len(gt_to_raw)
+        summary["gt_duplex_abs_p50_ms"] = float(np.percentile(arr_gt_to, 50))
+        summary["gt_duplex_abs_p95_ms"] = float(np.percentile(arr_gt_to, 95))
+        summary["gt_duplex_abs_max_ms"] = float(np.max(arr_gt_to))
+    else:
+        summary["gt_duplex_count"] = 0
+
     summary_path = os.path.join(run_dir, "summary.json")
     write_json(summary_path, summary)
 
@@ -685,19 +731,23 @@ def main() -> int:
     print(f"[AutoBrowser] RESULT: {ok}/{total} cases OK")
     print(f"[AutoBrowser] Joined: {joined}/{total}")
     print(f"[AutoBrowser] Has Audio: {has_audio}/{total}")
+    # D15: GT KPI as primary
+    if gt_raw_vals:
+        print(f"[AutoBrowser] USER_KPI_GT raw: P50={summary['gt_kpi_raw_p50_ms']:.0f}ms "
+              f"P95={summary['gt_kpi_raw_p95_ms']:.0f}ms "
+              f"min={summary['gt_kpi_raw_min_ms']:.0f}ms")
+    if summary.get("gt_tt_count", 0) > 0:
+        print(f"[AutoBrowser] GT Turn-taking: P50={summary['gt_tt_p50_ms']:.0f}ms "
+              f"P95={summary['gt_tt_p95_ms']:.0f}ms ({summary['gt_tt_count']} cases)")
+    print(f"[AutoBrowser] Talk-over (GT): {gt_to_count}/{total} "
+          f"(rate={summary.get('gt_talk_over_rate',0):.1%})")
+    # Legacy browser-based (reference)
     if raw_vals:
-        print(f"[AutoBrowser] USER_KPI raw: P50={summary['user_kpi_raw_p50_ms']:.0f}ms "
-              f"P95={summary['user_kpi_raw_p95_ms']:.0f}ms "
-              f"P99={summary['user_kpi_raw_p99_ms']:.0f}ms "
-              f"min={summary['user_kpi_raw_min_ms']:.0f}ms")
-        print(f"[AutoBrowser] USER_KPI clamped: P50={summary['user_kpi_p50_ms']:.0f}ms "
-              f"P95={summary['user_kpi_p95_ms']:.0f}ms "
-              f"P99={summary['user_kpi_p99_ms']:.0f}ms")
-    if summary.get("tt_count", 0) > 0:
-        print(f"[AutoBrowser] Turn-taking subset: P50={summary['tt_p50_ms']:.0f}ms "
-              f"P95={summary['tt_p95_ms']:.0f}ms ({summary['tt_count']} cases)")
-    print(f"[AutoBrowser] Talk-over: {summary['talk_over_count']}/{total} cases "
-          f"(rate={summary.get('talk_over_rate',0):.1%}, P95 abs={summary.get('talk_over_ms_p95', 0):.0f}ms)")
+        print(f"[AutoBrowser] (ref) browser KPI raw: P50={summary['user_kpi_raw_p50_ms']:.0f}ms "
+              f"P95={summary['user_kpi_raw_p95_ms']:.0f}ms")
+    if eot_lag_vals:
+        print(f"[AutoBrowser] EOT_LAG: P50={summary['browser_eot_lag_p50_ms']:.0f}ms "
+              f"P95={summary['browser_eot_lag_p95_ms']:.0f}ms (diagnostic)")
     print(f"[AutoBrowser] Net Profile: {args.net}")
     print(f"[AutoBrowser] Summary: {summary_path}")
     print(f"[AutoBrowser] Report: {report_path}")
@@ -706,45 +756,55 @@ def main() -> int:
 
 
 def _write_report(report_path: str, summary: dict, net_profile: str):
-    """Generate markdown report (D13: raw/clamped/talk_over)."""
+    """Generate markdown report (D15: GT KPI as primary)."""
     ensure_parent(report_path)
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoBrowser Report (D14)\n\n")
+        f.write("# AutoBrowser Report (D15)\n\n")
 
-        # D14 P0-1: Turn-taking KPI — only non-talk-over cases
-        f.write("## Turn-taking KPI (is_talk_over=false only)\n\n")
+        # D15 P0-1: PRIMARY — GT-based Turn-taking KPI
+        f.write("## USER_KPI_GT Turn-taking (is_talk_over_gt=false)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
-        tt_count = summary.get("tt_count", 0)
-        if tt_count > 0:
-            for lbl, key in [("P50", "tt_p50_ms"), ("P95", "tt_p95_ms"),
-                             ("P99", "tt_p99_ms"), ("min", "tt_min_ms"),
-                             ("max", "tt_max_ms")]:
+        gt_tt_count = summary.get("gt_tt_count", 0)
+        if gt_tt_count > 0:
+            for lbl, key in [("P50", "gt_tt_p50_ms"), ("P95", "gt_tt_p95_ms"),
+                             ("P99", "gt_tt_p99_ms"), ("min", "gt_tt_min_ms"),
+                             ("max", "gt_tt_max_ms")]:
                 v = summary.get(key)
                 if v is not None:
                     f.write(f"| {lbl} | {v:.0f} ms |\n")
-        f.write(f"| count | {tt_count} / {summary.get('user_kpi_count', 0)} |\n")
-        f.write(f"| talk_over_rate | {summary.get('talk_over_rate', 0):.1%} |\n")
-        if tt_count == 0:
-            f.write("| (all cases are talk-over) | — |\n")
+        f.write(f"| count | {gt_tt_count} / {summary.get('gt_kpi_count', 0)} |\n")
+        f.write(f"| talk_over_gt_rate | {summary.get('gt_talk_over_rate', 0):.1%} |\n")
+        if gt_tt_count == 0:
+            f.write("| (all cases are talk-over) | -- |\n")
         f.write("\n")
 
-        # D14 P0-1: Duplex KPI — talk-over cases (abs values)
-        f.write("## Duplex KPI (is_talk_over=true, abs values)\n\n")
+        # D15: GT-based Duplex KPI
+        f.write("## USER_KPI_GT Duplex (is_talk_over_gt=true, abs values)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
-        duplex_count = summary.get("duplex_count", 0)
-        f.write(f"| talk_over_count | {summary.get('talk_over_count', 0)} |\n")
-        if duplex_count > 0:
-            for lbl, key in [("abs P50", "duplex_abs_p50_ms"), ("abs P95", "duplex_abs_p95_ms"),
-                             ("abs max", "duplex_abs_max_ms")]:
+        gt_dup_count = summary.get("gt_duplex_count", 0)
+        f.write(f"| talk_over_gt_count | {summary.get('talk_over_gt_count', 0)} |\n")
+        if gt_dup_count > 0:
+            for lbl, key in [("abs P50", "gt_duplex_abs_p50_ms"),
+                             ("abs P95", "gt_duplex_abs_p95_ms"),
+                             ("abs max", "gt_duplex_abs_max_ms")]:
                 v = summary.get(key)
                 if v is not None:
                     f.write(f"| {lbl} | {v:.0f} ms |\n")
         else:
-            f.write("| (no talk-over) | — |\n")
+            f.write("| (no talk-over) | -- |\n")
         f.write("\n")
 
-        # D14: All-cases raw aggregate (for reference)
-        f.write("## All-Cases Raw Aggregate\n\n")
+        # D15: EOT_LAG diagnostic
+        if summary.get("browser_eot_lag_count", 0) > 0:
+            f.write("## EOT_LAG Diagnostic (browser EoT - GT EoT)\n\n")
+            f.write("| Metric | Value |\n|--------|-------|\n")
+            f.write(f"| eot_lag P50 | {summary['browser_eot_lag_p50_ms']:.0f} ms |\n")
+            f.write(f"| eot_lag P95 | {summary['browser_eot_lag_p95_ms']:.0f} ms |\n")
+            f.write(f"| samples | {summary['browser_eot_lag_count']} |\n")
+            f.write("\n")
+
+        # D15: Legacy browser-based (reference, demoted)
+        f.write("## (Reference) Browser-based KPI\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
         for lbl, key in [("raw P50", "user_kpi_raw_p50_ms"), ("raw P95", "user_kpi_raw_p95_ms"),
                          ("raw P99", "user_kpi_raw_p99_ms"), ("raw min", "user_kpi_raw_min_ms"),
@@ -753,64 +813,41 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
             if v is not None:
                 f.write(f"| {lbl} | {v:.0f} ms |\n")
         f.write(f"| total count | {summary.get('user_kpi_count', 0)} |\n")
-        f.write("\n")
+        f.write(f"| talk_over (browser) | {summary.get('talk_over_count', 0)} |\n")
+        f.write(f"| talk_over (gt) | {summary.get('talk_over_gt_count', 0)} |\n")
+        f.write("\n> Browser-based KPI includes SILENCE_TIMEOUT_MS overhead; use GT KPI for gates.\n\n")
 
-        # D14 P0-2: Ground-truth EoT calibration section
-        if summary.get("browser_eot_lag_count", 0) > 0:
-            f.write("## EoT Calibration (Ground-Truth vs Browser)\n\n")
-            f.write("| Metric | Value |\n|--------|-------|\n")
-            f.write(f"| browser_eot_lag P50 | {summary['browser_eot_lag_p50_ms']:.0f} ms |\n")
-            f.write(f"| browser_eot_lag P95 | {summary['browser_eot_lag_p95_ms']:.0f} ms |\n")
-            f.write(f"| talk_over (browser) | {summary.get('talk_over_count', 0)} |\n")
-            f.write(f"| talk_over (gt, margin=50ms) | {summary.get('talk_over_gt_count', 0)} |\n")
-            f.write(f"| measurement samples | {summary['browser_eot_lag_count']} |\n")
-            f.write("\n")
-            gt_to = summary.get('talk_over_gt_count', 0)
-            browser_to = summary.get('talk_over_count', 0)
-            if browser_to > gt_to:
-                f.write(f"> **{browser_to - gt_to}** talk-over cases are measurement artifacts "
-                        f"(browser EoT lag, not real agent interruption).\n\n")
-            elif gt_to > 0:
-                f.write(f"> All {gt_to} talk-over cases are confirmed real agent interruptions.\n\n")
-
-        f.write(f"\n## Run Info\n\n")
+        # Run info
+        f.write(f"## Run Info\n\n")
         f.write(f"- run_id: `{summary['run_id']}`\n")
         f.write(f"- mode: `{summary['mode']}`\n")
         f.write(f"- net_profile: `{net_profile}` ({NET_PROFILES.get(net_profile, {}).get('description', '')})\n")
         f.write(f"- total: `{summary['total_cases']}`, ok: `{summary['ok_cases']}`, "
                 f"joined: `{summary['joined_cases']}`, has_audio: `{summary['has_audio_cases']}`\n\n")
 
+        # Per-case detail with GT columns
         f.write("## Per-Case Detail\n\n")
-        f.write("| # | case_id | tier | ok | joined | audio | raw_ms | clamped_ms | talk_over | elapsed |\n")
-        f.write("|---|---------|------|----|--------|-------|--------|------------|-----------|----------|\n")
+        f.write("| # | case_id | tier | ok | gt_raw_ms | gt_clamp_ms | TO_gt "
+                "| browser_raw_ms | eot_lag_ms | elapsed |\n")
+        f.write("|---|---------|------|----|-----------|-------------|-------"
+                "|----------------|------------|----------|\n")
         for i, c in enumerate(summary.get("cases", [])):
             ok_s = "PASS" if c.get("ok") else "FAIL"
-            j_s = "Y" if c.get("joined") else "N"
-            a_s = "Y" if c.get("has_reply_audio") else "N"
-            raw_v = f"{c['user_kpi_raw_ms']:.0f}" if c.get('user_kpi_raw_ms') is not None else "—"
-            clamp_v = f"{c['user_kpi_ms']:.0f}" if c.get("user_kpi_ms") is not None else "—"
-            to_v = "Y" if c.get("is_talk_over") else ""
+            gt_raw = f"{c['user_kpi_gt_raw_ms']:.0f}" if c.get('user_kpi_gt_raw_ms') is not None else "--"
+            gt_clamp = f"{c['user_kpi_gt_clamped_ms']:.0f}" if c.get('user_kpi_gt_clamped_ms') is not None else "--"
+            to_gt = "Y" if c.get("is_talk_over_gt") else ""
+            b_raw = f"{c['user_kpi_raw_ms']:.0f}" if c.get('user_kpi_raw_ms') is not None else "--"
+            lag = f"{c['browser_eot_lag_ms']:.0f}" if c.get('browser_eot_lag_ms') is not None else "--"
             elapsed = f"{c.get('elapsed_s', 0):.0f}s"
-            f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | "
-                    f"{ok_s} | {j_s} | {a_s} | {raw_v} | {clamp_v} | {to_v} | {elapsed} |\n")
-
-        # WARN gate
-        if summary.get("user_kpi_p95_ms") is not None:
-            p95 = summary["user_kpi_p95_ms"]
-            warn_ok = p95 <= 900.0
-            f.write(f"\n## WARN Gate\n\n")
-            f.write(f"- {'OK' if warn_ok else 'WARN'}: USER_KPI P95 <= 900ms "
-                    f"(actual: `{p95:.0f}ms`)\n")
-            f.write(f"- Target: <= 600ms | Stretch: <= 450ms\n")
+            f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | {ok_s} "
+                    f"| {gt_raw} | {gt_clamp} | {to_gt} "
+                    f"| {b_raw} | {lag} | {elapsed} |\n")
 
         # Net profile info
         f.write(f"\n## Network Profile: `{net_profile}`\n\n")
         prof = NET_PROFILES.get(net_profile, {})
         if prof:
-            f.write(f"- Description: {prof.get('description', 'N/A')}\n")
-            f.write(f"- Delay: {prof.get('delay_ms', 0)}ms one-way | "
-                    f"Jitter: {prof.get('jitter_ms', 0)}ms | "
-                    f"Loss: {prof.get('loss_pct', 0)}%\n")
+            f.write(f"- {prof.get('description', 'N/A')}\n")
 
         # Errors
         errors = [c for c in summary.get("cases", []) if c.get("error")]

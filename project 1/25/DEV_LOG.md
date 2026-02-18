@@ -1130,3 +1130,49 @@ Full 16 cases: 16/16 PASS, TT subset P50=365ms P95=2745ms (5 cases)
 | d14_matrix_cases.json | 新增 4-case 矩阵用例 |
 | network_impairment_roadmap.md | 新增 |
 | golden/d14_userkpi_baseline/ | 新增 baseline 数据 |
+
+## Phase 12: D15 - 可控可优化系统升级 (2026-02-18)
+
+### 12.1 P0-1: KPI 口径升级 — USER_KPI_GT 为主
+
+核心变更：把主 KPI 从浏览器侧 EoT（含 SILENCE_TIMEOUT 膨胀）切换到 GT EoT（离线 WAV 分析的真实语音结束时间）。
+
+- `webrtc_test.html`: `finalizeTrace()` 新增 `user_kpi_gt_raw_ms` 和 `user_kpi_gt_clamped_ms`
+- `run_suite.py`: GT KPI 聚合 (gt_tt_p50/p95/p99), report 主表改为 USER_KPI_GT, 旧浏览器 KPI 降级为参考
+- `audio_metrics.py`: gate 改用 `gt_tt_p95` 而非 `user_kpi_p95`
+- 验收：AUTO_MODE 的 1500ms 静默确认不再抬高主 KPI
+
+### 12.2 P0-2: MODE 模式分离 — turn_taking vs duplex
+
+- `livekit_agent.py`: 新增 `MODE` 环境变量 (默认 `turn_taking`)
+  - turn_taking: `allow_interruptions=False`, 保守 endpointing (1200ms)
+  - duplex: `allow_interruptions=True`, 敏感 endpointing (300ms)
+- `audio_metrics.py`: Turn-taking gate `talk_over_gt_count == 0`, Duplex gate WARN only
+
+### 12.3 P0-3: Endpointing / Barge-in 双 VAD 分离
+
+`livekit_agent.py` 新增独立配置：
+- `ENDPOINTING_MIN_SILENCE_MS`: turn_taking=1200ms, duplex=300ms
+- `BARGEIN_MIN_SPEECH_MS`: 120ms（抗噪：需连续语音才触发）
+- `BARGEIN_ACTIVATION_THRESHOLD`: turn_taking=0.7, duplex=0.5（高阈值=保守=抗噪）
+- Silero VAD 参数 min_silence/min_speech/activation_threshold 独立配置
+
+### 12.4 P0-4: 自动参数搜索 run_endpointing_grid.py
+
+- 9 组参数 × 4 case × 3 repeats, Pareto 表输出, 自动选最优配置
+
+### 12.5 P0-5: D15 基线冻结 freeze_d15_baseline.sh
+
+- 5×mini + 1×full16, GT_TT_P95 计算 FAIL 阈值, 冻结到 golden/d15_userkpi_gt_baseline/
+
+### 12.6 代码变更清单
+
+| 文件 | 变更 |
+|------|------|
+| webrtc_test.html | +user_kpi_gt_raw_ms/clamped_ms |
+| run_suite.py | GT KPI 聚合/report 主表/console 全面升级 |
+| livekit_agent.py | MODE + 双 VAD 独立配置 |
+| audio_metrics.py | GT-based gates + mode-aware 门控 |
+| run_endpointing_grid.py | 新增自动参数搜索 |
+| freeze_d15_baseline.sh | 新增基线冻结脚本 |
+| golden/d15_userkpi_gt_baseline/ | 新增目录 |

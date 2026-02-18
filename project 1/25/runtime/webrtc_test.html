@@ -280,11 +280,21 @@
         }
       }
 
+      // D15 P0-1: GT-based USER_KPI (primary metric, immune to SILENCE_TIMEOUT inflation)
+      let user_kpi_gt_raw_ms = null;
+      let user_kpi_gt_clamped_ms = null;
+      if (t_user_eot_gt != null && hasPlayout) {
+        user_kpi_gt_raw_ms = Math.round(currentTrace.t_browser_first_playout - t_user_eot_gt);
+        user_kpi_gt_clamped_ms = Math.max(0, user_kpi_gt_raw_ms);
+      }
+
       const traceData = {
         ...currentTrace,
         user_kpi_raw_ms: raw_kpi_ms,
         user_kpi_ms: user_kpi_clamped,
         is_talk_over,
+        user_kpi_gt_raw_ms,
+        user_kpi_gt_clamped_ms,
         eot_to_first_audio_ms: user_kpi_clamped,
         playout_resolution_ms: PLAYOUT_POLL_MS,
         mic_resolution_ms: MIC_POLL_MS,
