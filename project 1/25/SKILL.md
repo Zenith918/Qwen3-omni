@@ -974,3 +974,25 @@ WAV 内部自然停顿 > 400ms 会触发 monitorMic 的 EoT 检测，造成虚�
 
 当 Cursor 已通过 SSH 连接到 RunPod 时，`/workspace` 就是 GPU 服务器本身。
 **不要从 GPU 上 SSH 到自己的外网 IP**——直接在本地执行命令即可。
+
+
+### 15.10 D14 Turn-taking vs Duplex 统计拆分
+
+USER_KPI 必须分两套统计：
+- **Turn-taking**: 仅 is_talk_over=false，用于 gate 判定
+- **Duplex**: 仅 is_talk_over=true 的绝对值，用于监控
+- 混合统计会被 talk-over 的大负值污染 P50
+
+### 15.11 Ground-Truth EoT 对齐
+
+browser_eot_lag_ms = browser EoT - GT EoT ≈ SILENCE_TIMEOUT_MS。
+如果 talk_over(browser) > talk_over(gt)，差值是测量口径问题。
+如果 talk_over(gt) > 0，是真实产品抢话。
+
+### 15.12 Silence 矩阵实验心得
+
+TURN_TAKING_MIN_SILENCE_MS 不是越大越好：
+- 太小 (200ms) → agent 反应快但偶有抢话
+- 太大 (1200ms) → 延迟增加但 talk-over 减少
+- noise_background 始终 talk-over → 是输入信号问题，不是阈值问题
+- 单次运行方差大，结论需 3+ runs 交叉验证

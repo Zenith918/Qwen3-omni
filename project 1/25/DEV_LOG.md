@@ -1069,3 +1069,64 @@ Different layers. See output/autobrowser/calibration_report.md.
 200ms latency injection confirmed (29ms direct vs 253ms proxy).
 
 ### 10.15 D13 COMPLETE - all P0/P1 tasks done
+
+
+## Phase 11: D14 - Turn-taking/Duplex 拆分 + GT EoT + Silence 矩阵 (2026-02-18)
+
+### 11.1 P0-1: Turn-taking / Duplex 双表
+
+report.md 拆分为三个 KPI 表：
+- **Turn-taking KPI**: 仅 is_talk_over=false 的 case (tt_p50/tt_p95/tt_count)
+- **Duplex KPI**: 仅 is_talk_over=true 的 case (abs 值分布)
+- **All-Cases Raw Aggregate**: 全量原始值（含正负）
+
+新增字段: talk_over_rate, tt_p95_ms, duplex_abs_p95_ms
+
+### 11.2 P0-2: Ground-Truth EoT
+
+离线分析输入 WAV 得到 gt_speech_end_ms，通过 URL 参数注入浏览器。
+trace 新增: t_user_eot_gt, browser_eot_lag_ms, is_talk_over_gt (margin=50ms)
+
+report 新增 EoT Calibration 段，可回答：talk-over 是测量口径问题还是产品抢话。
+browser_eot_lag 约 1316ms（≈ SILENCE_TIMEOUT 1500ms - 检测延迟）。
+
+### 11.3 P0-3: Silence 矩阵实验
+
+| Min Silence | TT P95 | TO Rate |
+|-------------|--------|---------|
+| 200ms       | 624ms  | 25%     |
+| 400ms       | N/A    | 100%    |
+| 600ms       | 640ms  | 50%     |
+| 900ms       | 738ms  | 50%     |
+| 1200ms      | 438ms  | 25%     |
+
+Pareto 最优: 1200ms (TT P95=438ms, TO 仅 noise_background)。
+noise_background 的 talk-over 是背景噪声干扰 VAD，非 silence 阈值问题。
+
+### 11.4 P0-4: Baseline (D14 新口径)
+
+5x mini (19 TT 数据点):
+- TT P95=3207ms, sigma=902ms
+- FAIL threshold = 3257ms, FAIL_READY=True
+- 已保存 golden/d14_userkpi_baseline/
+
+Full 16 cases: 16/16 PASS, TT subset P50=365ms P95=2745ms (5 cases)
+
+### 11.5 P1: 网络损伤路线
+
+- toxiproxy: 仅 TCP 控制面，不影响 WebRTC UDP 媒体流
+- netem: 需 cap_net_admin，推荐 RunPod 开启
+- 详见 output/autobrowser/network_impairment_roadmap.md
+
+### 11.6 代码变更清单
+
+| 文件 | 变更 |
+|------|------|
+| run_suite.py | TT/Duplex 子集统计 + GT EoT 分析/注入 + report 三表 |
+| webrtc_test.html | GT_SPEECH_END_MS 参数 + trace GT 字段 |
+| livekit_agent.py | TURN_TAKING_MIN_SILENCE_MS 旋钮 |
+| audio_metrics.py | FAIL=3257ms, FAIL_READY=True |
+| run_silence_matrix.sh | 新增矩阵实验脚本 |
+| d14_matrix_cases.json | 新增 4-case 矩阵用例 |
+| network_impairment_roadmap.md | 新增 |
+| golden/d14_userkpi_baseline/ | 新增 baseline 数据 |

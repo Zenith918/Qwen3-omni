@@ -115,6 +115,36 @@ def _clear_netem(interface: str):
 
 SILENCE_PAD_S = 10  # seconds of silence appended after speech
 
+GT_EOT_THRESHOLD = 0.01   # RMS threshold for speech vs silence in ground-truth analysis
+GT_EOT_SILENCE_MS = 300   # minimum silence duration (ms) to declare ground-truth EoT
+
+
+def _analyze_wav_gt_eot(wav_path: str, threshold: float = GT_EOT_THRESHOLD,
+                         min_silence_ms: float = GT_EOT_SILENCE_MS) -> float:
+    """
+    D14 P0-2: Offline analysis of WAV to find ground-truth speech end time.
+    Returns gt_speech_end_ms (ms from start of audio to last speech energy above threshold).
+    """
+    import numpy as np
+    with wave.open(wav_path, "rb") as wf:
+        sr = wf.getframerate()
+        n_ch = wf.getnchannels()
+        raw = wf.readframes(wf.getnframes())
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if n_ch > 1:
+        audio = audio.reshape(-1, n_ch)[:, 0]
+
+    frame_len = int(sr * 0.01)  # 10ms frames
+    last_speech_frame = 0
+    for i in range(0, len(audio) - frame_len, frame_len):
+        frame = audio[i:i + frame_len]
+        rms = float(np.sqrt(np.mean(frame ** 2)))
+        if rms > threshold:
+            last_speech_frame = i + frame_len
+
+    gt_speech_end_ms = (last_speech_frame / sr) * 1000.0
+    return gt_speech_end_ms
+
 
 def _prepare_chromium_wav(src_wav: str, dst_wav: str, silence_pad_s: float = SILENCE_PAD_S) -> str:
     """
@@ -176,6 +206,7 @@ async def _run_browser_case(
     record_seconds: int,
     case_dir: str,
     headless: bool = True,
+    gt_speech_end_ms: float = 0.0,
 ) -> dict:
     """
     Launch Chromium via Playwright, open webrtc_test.html with auto params,
@@ -203,6 +234,7 @@ async def _run_browser_case(
         "case_id": case_id,
         "turn_id": turn_id,
         "auto_disconnect_s": str(record_seconds),
+        "gt_speech_end_ms": str(gt_speech_end_ms),
     }
     full_url = f"{page_url}?{urlencode(params)}"
 
@@ -435,6 +467,9 @@ def main() -> int:
         wav_48k = os.path.join(wav_cache_dir, f"{case_id}_48k.wav")
         wav_48k = _prepare_chromium_wav(wav_path, wav_48k)
 
+        # D14 P0-2: Offline ground-truth EoT from original WAV
+        gt_speech_end_ms = _analyze_wav_gt_eot(wav_path)
+
         # Get token
         try:
             token, lk_url = _fetch_token(args.token_api, case_room, args.identity)
@@ -467,6 +502,7 @@ def main() -> int:
             record_seconds=rec_s,
             case_dir=case_dir,
             headless=bool(args.headless),
+            gt_speech_end_ms=gt_speech_end_ms,
         ))
 
         t_end = time.time()
@@ -495,8 +531,8 @@ def main() -> int:
         user_kpi_raw_ms = None
         user_kpi_clamped_ms = None
         is_talk_over = False
+        best = None
         if traces:
-            best = None
             for t in traces:
                 if t.get("user_kpi_raw_ms") is not None:
                     if not t.get("is_talk_over", False):
@@ -507,6 +543,13 @@ def main() -> int:
                 user_kpi_raw_ms = best["user_kpi_raw_ms"]
                 user_kpi_clamped_ms = best.get("user_kpi_ms")
                 is_talk_over = best.get("is_talk_over", False)
+
+        # D14 P0-2: Extract GT EoT fields from the SAME best trace used for USER_KPI
+        browser_eot_lag_ms = None
+        is_talk_over_gt = None
+        if best:
+            browser_eot_lag_ms = best.get("browser_eot_lag_ms")
+            is_talk_over_gt = best.get("is_talk_over_gt")
 
         status = "PASS" if browser_result["ok"] else "FAIL"
         join_s = "Y" if browser_result["joined"] else "N"
@@ -535,6 +578,9 @@ def main() -> int:
             "error": browser_result.get("error"),
             "recording_wav": browser_result.get("recording_wav", ""),
             "browser_trace_count": len(traces),
+            "gt_speech_end_ms": gt_speech_end_ms,
+            "browser_eot_lag_ms": browser_eot_lag_ms,
+            "is_talk_over_gt": is_talk_over_gt,
         }
         summary["cases"].append(case_result)
 
@@ -588,13 +634,45 @@ def main() -> int:
         summary["user_kpi_p99_ms"] = float(np.percentile(arr_clamp, 99))
         summary["user_kpi_max_ms"] = float(np.max(arr_clamp))
         summary["user_kpi_count"] = len(raw_vals)
-    # Talk-over stats
+    # D14 P0-1: Split into Turn-taking subset (is_talk_over=false) and Duplex subset (is_talk_over=true)
+    tt_raw = [c["user_kpi_raw_ms"] for c in summary["cases"]
+              if c.get("user_kpi_raw_ms") is not None and not c.get("is_talk_over")]
+    if tt_raw:
+        arr_tt = np.array(tt_raw, dtype=np.float64)
+        summary["tt_count"] = len(tt_raw)
+        summary["tt_p50_ms"] = float(np.percentile(arr_tt, 50))
+        summary["tt_p95_ms"] = float(np.percentile(arr_tt, 95))
+        summary["tt_p99_ms"] = float(np.percentile(arr_tt, 99))
+        summary["tt_min_ms"] = float(np.min(arr_tt))
+        summary["tt_max_ms"] = float(np.max(arr_tt))
+    else:
+        summary["tt_count"] = 0
+
+    # Talk-over / Duplex stats
     summary["talk_over_count"] = len(talk_overs)
+    summary["talk_over_rate"] = len(talk_overs) / len(summary["cases"]) if summary["cases"] else 0
     if talk_over_raw:
         arr_to = np.array(talk_over_raw, dtype=np.float64)
         summary["talk_over_ms_p95"] = float(np.percentile(arr_to, 95))
+        summary["duplex_count"] = len(talk_over_raw)
+        summary["duplex_abs_p50_ms"] = float(np.percentile(arr_to, 50))
+        summary["duplex_abs_p95_ms"] = float(np.percentile(arr_to, 95))
+        summary["duplex_abs_max_ms"] = float(np.max(arr_to))
     else:
         summary["talk_over_ms_p95"] = 0
+        summary["duplex_count"] = 0
+
+    # D14 P0-2: browser_eot_lag_ms aggregate
+    eot_lag_vals = [c["browser_eot_lag_ms"] for c in summary["cases"]
+                    if c.get("browser_eot_lag_ms") is not None]
+    if eot_lag_vals:
+        arr_lag = np.array(eot_lag_vals, dtype=np.float64)
+        summary["browser_eot_lag_p50_ms"] = float(np.percentile(arr_lag, 50))
+        summary["browser_eot_lag_p95_ms"] = float(np.percentile(arr_lag, 95))
+        summary["browser_eot_lag_count"] = len(eot_lag_vals)
+    # D14 P0-2: is_talk_over_gt aggregate
+    gt_to_count = sum(1 for c in summary["cases"] if c.get("is_talk_over_gt") is True)
+    summary["talk_over_gt_count"] = gt_to_count
 
     summary_path = os.path.join(run_dir, "summary.json")
     write_json(summary_path, summary)
@@ -615,8 +693,11 @@ def main() -> int:
         print(f"[AutoBrowser] USER_KPI clamped: P50={summary['user_kpi_p50_ms']:.0f}ms "
               f"P95={summary['user_kpi_p95_ms']:.0f}ms "
               f"P99={summary['user_kpi_p99_ms']:.0f}ms")
+    if summary.get("tt_count", 0) > 0:
+        print(f"[AutoBrowser] Turn-taking subset: P50={summary['tt_p50_ms']:.0f}ms "
+              f"P95={summary['tt_p95_ms']:.0f}ms ({summary['tt_count']} cases)")
     print(f"[AutoBrowser] Talk-over: {summary['talk_over_count']}/{total} cases "
-          f"(P95 abs={summary.get('talk_over_ms_p95', 0):.0f}ms)")
+          f"(rate={summary.get('talk_over_rate',0):.1%}, P95 abs={summary.get('talk_over_ms_p95', 0):.0f}ms)")
     print(f"[AutoBrowser] Net Profile: {args.net}")
     print(f"[AutoBrowser] Summary: {summary_path}")
     print(f"[AutoBrowser] Report: {report_path}")
@@ -628,40 +709,69 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
     """Generate markdown report (D13: raw/clamped/talk_over)."""
     ensure_parent(report_path)
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoBrowser Report (D13)\n\n")
+        f.write("# AutoBrowser Report (D14)\n\n")
 
-        # D13: Turn-taking KPI table (raw + clamped)
-        f.write("## Turn-taking KPI\n\n")
+        # D14 P0-1: Turn-taking KPI — only non-talk-over cases
+        f.write("## Turn-taking KPI (is_talk_over=false only)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
-        if summary.get("user_kpi_p50_ms") is not None:
-            for lbl, key in [("clamped P50", "user_kpi_p50_ms"), ("clamped P95", "user_kpi_p95_ms"),
-                             ("clamped P99", "user_kpi_p99_ms"), ("clamped max", "user_kpi_max_ms")]:
+        tt_count = summary.get("tt_count", 0)
+        if tt_count > 0:
+            for lbl, key in [("P50", "tt_p50_ms"), ("P95", "tt_p95_ms"),
+                             ("P99", "tt_p99_ms"), ("min", "tt_min_ms"),
+                             ("max", "tt_max_ms")]:
                 v = summary.get(key)
                 if v is not None:
                     f.write(f"| {lbl} | {v:.0f} ms |\n")
-        if summary.get("user_kpi_raw_p50_ms") is not None:
-            for lbl, key in [("raw P50", "user_kpi_raw_p50_ms"), ("raw P95", "user_kpi_raw_p95_ms"),
-                             ("raw P99", "user_kpi_raw_p99_ms"), ("raw min", "user_kpi_raw_min_ms"),
-                             ("raw max", "user_kpi_raw_max_ms")]:
-                v = summary.get(key)
-                if v is not None:
-                    f.write(f"| {lbl} | {v:.0f} ms |\n")
-        cnt = summary.get('user_kpi_count', 0)
-        f.write(f"| count | {cnt} |\n")
-        if not summary.get("user_kpi_p50_ms"):
-            f.write("| (no data) | - |\n")
+        f.write(f"| count | {tt_count} / {summary.get('user_kpi_count', 0)} |\n")
+        f.write(f"| talk_over_rate | {summary.get('talk_over_rate', 0):.1%} |\n")
+        if tt_count == 0:
+            f.write("| (all cases are talk-over) | — |\n")
         f.write("\n")
-        # D13: Duplex KPI table
-        f.write("## Duplex KPI\n\n")
+
+        # D14 P0-1: Duplex KPI — talk-over cases (abs values)
+        f.write("## Duplex KPI (is_talk_over=true, abs values)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
-        toc = summary.get('talk_over_count', 0)
-        f.write(f"| talk_over_count | {toc} |\n")
-        to_p95 = summary.get("talk_over_ms_p95")
-        if to_p95:
-            f.write(f"| talk_over_ms P95 | {to_p95:.0f} ms |\n")
+        duplex_count = summary.get("duplex_count", 0)
+        f.write(f"| talk_over_count | {summary.get('talk_over_count', 0)} |\n")
+        if duplex_count > 0:
+            for lbl, key in [("abs P50", "duplex_abs_p50_ms"), ("abs P95", "duplex_abs_p95_ms"),
+                             ("abs max", "duplex_abs_max_ms")]:
+                v = summary.get(key)
+                if v is not None:
+                    f.write(f"| {lbl} | {v:.0f} ms |\n")
         else:
-            f.write("| talk_over_ms P95 | N/A |\n")
+            f.write("| (no talk-over) | — |\n")
         f.write("\n")
+
+        # D14: All-cases raw aggregate (for reference)
+        f.write("## All-Cases Raw Aggregate\n\n")
+        f.write("| Metric | Value |\n|--------|-------|\n")
+        for lbl, key in [("raw P50", "user_kpi_raw_p50_ms"), ("raw P95", "user_kpi_raw_p95_ms"),
+                         ("raw P99", "user_kpi_raw_p99_ms"), ("raw min", "user_kpi_raw_min_ms"),
+                         ("raw max", "user_kpi_raw_max_ms")]:
+            v = summary.get(key)
+            if v is not None:
+                f.write(f"| {lbl} | {v:.0f} ms |\n")
+        f.write(f"| total count | {summary.get('user_kpi_count', 0)} |\n")
+        f.write("\n")
+
+        # D14 P0-2: Ground-truth EoT calibration section
+        if summary.get("browser_eot_lag_count", 0) > 0:
+            f.write("## EoT Calibration (Ground-Truth vs Browser)\n\n")
+            f.write("| Metric | Value |\n|--------|-------|\n")
+            f.write(f"| browser_eot_lag P50 | {summary['browser_eot_lag_p50_ms']:.0f} ms |\n")
+            f.write(f"| browser_eot_lag P95 | {summary['browser_eot_lag_p95_ms']:.0f} ms |\n")
+            f.write(f"| talk_over (browser) | {summary.get('talk_over_count', 0)} |\n")
+            f.write(f"| talk_over (gt, margin=50ms) | {summary.get('talk_over_gt_count', 0)} |\n")
+            f.write(f"| measurement samples | {summary['browser_eot_lag_count']} |\n")
+            f.write("\n")
+            gt_to = summary.get('talk_over_gt_count', 0)
+            browser_to = summary.get('talk_over_count', 0)
+            if browser_to > gt_to:
+                f.write(f"> **{browser_to - gt_to}** talk-over cases are measurement artifacts "
+                        f"(browser EoT lag, not real agent interruption).\n\n")
+            elif gt_to > 0:
+                f.write(f"> All {gt_to} talk-over cases are confirmed real agent interruptions.\n\n")
 
         f.write(f"\n## Run Info\n\n")
         f.write(f"- run_id: `{summary['run_id']}`\n")

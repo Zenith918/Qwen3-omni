@@ -207,6 +207,10 @@
     const PLAYOUT_POLL_MS = parseInt(_params.get('playout_poll_ms') || '5', 10);
     const MIC_POLL_MS = parseInt(_params.get('mic_poll_ms') || '10', 10);
 
+    // D14 P0-2: Ground-truth speech end time from offline WAV analysis (ms from WAV start)
+    const GT_SPEECH_END_MS = parseFloat(_params.get('gt_speech_end_ms') || '0');
+    const GT_TALK_OVER_MARGIN_MS = 50;
+
     function startBrowserTrace() {
       currentTrace = {
         trace_id: PARAM_TRACE_ID,
@@ -261,6 +265,21 @@
         : `Trace incomplete (eot=${hasEot} playout=${hasPlayout})`;
       log(label, (hasPlayout && hasEot) ? (is_talk_over ? 'event' : 'success') : 'info');
 
+      // D14 P0-2: Ground-truth EoT calibration
+      let t_user_eot_gt = null;
+      let browser_eot_lag_ms = null;
+      let is_talk_over_gt = null;
+      if (GT_SPEECH_END_MS > 0 && currentTrace.t_user_speech_start != null) {
+        // GT speech end time relative to performance.now() timeline
+        t_user_eot_gt = currentTrace.t_user_speech_start + GT_SPEECH_END_MS;
+        if (hasEot) {
+          browser_eot_lag_ms = Math.round(currentTrace.t_user_speech_end - t_user_eot_gt);
+        }
+        if (hasPlayout) {
+          is_talk_over_gt = currentTrace.t_browser_first_playout < (t_user_eot_gt - GT_TALK_OVER_MARGIN_MS);
+        }
+      }
+
       const traceData = {
         ...currentTrace,
         user_kpi_raw_ms: raw_kpi_ms,
@@ -269,6 +288,10 @@
         eot_to_first_audio_ms: user_kpi_clamped,
         playout_resolution_ms: PLAYOUT_POLL_MS,
         mic_resolution_ms: MIC_POLL_MS,
+        gt_speech_end_ms: GT_SPEECH_END_MS > 0 ? GT_SPEECH_END_MS : null,
+        t_user_eot_gt,
+        browser_eot_lag_ms,
+        is_talk_over_gt,
         wall_time: Date.now(),
       };
       browserTraces.push(traceData);

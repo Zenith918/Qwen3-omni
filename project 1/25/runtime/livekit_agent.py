@@ -57,6 +57,10 @@ TTS_FRAME_MS = int(os.environ.get("TTS_FRAME_MS", "20"))
 VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "200"))
 VAD_PREFIX_MS = int(os.environ.get("VAD_PREFIX_MS", "300"))
 MIN_ENDPOINTING = float(os.environ.get("MIN_ENDPOINTING", "0.3"))
+# D14 P0-3: Turn-taking minimum silence knob (ms) — overrides MIN_ENDPOINTING if set
+TURN_TAKING_MIN_SILENCE_MS = int(os.environ.get("TURN_TAKING_MIN_SILENCE_MS", "0"))
+if TURN_TAKING_MIN_SILENCE_MS > 0:
+    MIN_ENDPOINTING = TURN_TAKING_MIN_SILENCE_MS / 1000.0
 
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "150"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))

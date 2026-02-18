@@ -1,0 +1,13 @@
+{
+  "dataset": "5x_mini_turn_taking_only",
+  "n_samples": 19,
+  "p50_ms": 485.0,
+  "p95_ms": 3206.999999999999,
+  "p99_ms": 3509.4,
+  "min_ms": 250.0,
+  "max_ms": 3585.0,
+  "mean_ms": 781.3157894736842,
+  "sigma_ms": 901.6371689807017,
+  "suggested_fail_threshold_ms": 3256.999999999999,
+  "warn_threshold_ms": 900.0
+}
