@@ -702,9 +702,16 @@ def main() -> int:
     # D13 P0-4: USER_KPI WARN gate (prepare for FAIL upgrade)
     # Current: WARN only. After stability sampling, set FAIL threshold = baseline_P95 + 50ms
     USER_KPI_WARN_THRESHOLD_MS = 900.0
+    # D13 P0-4: FAIL threshold from 3x stability sampling:
+    # baseline_P95 (max across 3 runs) = 710ms, FAIL = 710 + 50 = 760ms
+    # Set FAIL_READY = True to upgrade WARN -> FAIL gate
+    USER_KPI_FAIL_THRESHOLD_MS = 760.0
+    USER_KPI_FAIL_READY = False  # flip to True after broader validation (20+ cases)
     warn_gates = {}
     if user_kpi_p95 is not None:
         warn_gates["USER_KPI P95 <= 900ms (WARN)"] = user_kpi_p95 <= USER_KPI_WARN_THRESHOLD_MS
+        if USER_KPI_FAIL_READY:
+            gates["USER_KPI P95 <= 760ms"] = user_kpi_p95 <= USER_KPI_FAIL_THRESHOLD_MS
 
     # Write USER_KPI into summary
     summary["USER_KPI_P95_MS"] = user_kpi_p95

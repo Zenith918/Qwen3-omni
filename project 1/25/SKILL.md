@@ -956,3 +956,21 @@ case_room = f"{args.room}-{case_id}-{run_id[-6:]}"
 
 D12→D13 过渡期的代码有多个语法错误（gates 字典缺值、f.write 在 with 块外、未定义变量）。
 **铁律：所有代码修改必须至少通过 `python3 -c "import py_compile; py_compile.compile(file)"` 验证编译通过。**
+
+### 15.7 SILENCE_TIMEOUT_MS 自适应
+
+WAV 内部自然停顿 > 400ms 会触发 monitorMic 的 EoT 检测，造成虚假 talk-over。
+**规则**: AUTO_MODE 下使用 1500ms（容忍自然停顿），手动模式保持 400ms（更灵敏）。
+代码: `const SILENCE_TIMEOUT_MS = parseInt(_params.get('silence_timeout_ms') || (AUTO_MODE ? '1500' : '400'), 10);`
+
+### 15.8 Trace 选择策略
+
+一次 WAV 播放可能产生多个 browser trace（因内部停顿或循环）。提取 USER_KPI 时：
+1. 优先选最后一个非 talk-over 的 trace（完整语句的响应时间）
+2. 如果全部 talk-over，取最后一个有效 trace
+3. 不要取第一个——第一个往往是自然停顿触发的虚假 turn
+
+### 15.9 RunPod SSH 注意事项
+
+当 Cursor 已通过 SSH 连接到 RunPod 时，`/workspace` 就是 GPU 服务器本身。
+**不要从 GPU 上 SSH 到自己的外网 IP**——直接在本地执行命令即可。

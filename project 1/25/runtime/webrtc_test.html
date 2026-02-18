@@ -201,7 +201,7 @@
     let mediaRecorder = null;
     let recordedChunks = [];
     const SPEECH_THRESHOLD = 0.015;
-    const SILENCE_TIMEOUT_MS = 400;
+    const SILENCE_TIMEOUT_MS = parseInt(_params.get('silence_timeout_ms') || (AUTO_MODE ? '1500' : '400'), 10);
 
     // D13 P0-3: Playout detection resolution (ms)
     const PLAYOUT_POLL_MS = parseInt(_params.get('playout_poll_ms') || '5', 10);

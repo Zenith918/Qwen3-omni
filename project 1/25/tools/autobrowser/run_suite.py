@@ -490,18 +490,23 @@ def main() -> int:
             "net_profile": args.net,
         })
 
-        # D13: Extract USER_KPI raw + clamped + talk_over from browser traces
+        # D13: Extract USER_KPI — prefer last non-talk-over trace (full utterance)
         traces = browser_result.get("browser_traces", [])
         user_kpi_raw_ms = None
         user_kpi_clamped_ms = None
         is_talk_over = False
         if traces:
+            best = None
             for t in traces:
                 if t.get("user_kpi_raw_ms") is not None:
-                    user_kpi_raw_ms = t["user_kpi_raw_ms"]
-                    user_kpi_clamped_ms = t.get("user_kpi_ms")
-                    is_talk_over = t.get("is_talk_over", False)
-                    break
+                    if not t.get("is_talk_over", False):
+                        best = t
+                    elif best is None:
+                        best = t
+            if best:
+                user_kpi_raw_ms = best["user_kpi_raw_ms"]
+                user_kpi_clamped_ms = best.get("user_kpi_ms")
+                is_talk_over = best.get("is_talk_over", False)
 
         status = "PASS" if browser_result["ok"] else "FAIL"
         join_s = "Y" if browser_result["joined"] else "N"
