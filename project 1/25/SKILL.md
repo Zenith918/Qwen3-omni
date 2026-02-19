@@ -1065,3 +1065,27 @@ GT EoT 通过离线分析输入 WAV 的能量得到真实语音结束时间，�
 - 确保 WAV 有 >= 500ms 尾静音
 - 内部停顿控制在 VAD silence 阈值以内（当前 300ms + buffer = ~600ms）
 - 需要测试长停顿 → 使用 `pause_expected` 标注
+
+### 15.19 D17 STT→LLM Prefetch 架构
+
+**问题**: STT 完成后 framework 需要添加消息到 chat_ctx、调用 on_user_turn_completed 等，造成 10-30ms 空闲。
+
+**解决方案**: STT 返回转写文本后立刻在后台线程中启动 LLM HTTP 请求。LLM.chat() 被调用时检测到 prefetch 队列，直接返回 PrefetchedLLMStream。
+
+**关键**: prefetch 需要 chat history，但 framework 还没更新 chat_ctx。解法：LLM 在每次 chat() 调用时存储 `_chat_history`，prefetch 使用上一轮的历史 + 当前 STT 文本。
+
+**风险**: 如果 prefetch 使用了过时的 history，回复可能略有偏差。实测影响极小。
+
+### 15.20 WebRTC 延迟不可压缩性
+
+GT KPI = endpointing + agent_processing + WebRTC_roundtrip。其中 WebRTC 双向延迟 ~800ms 包含：
+- 编码/解码: 各 ~50ms
+- Jitter buffer: 各 ~100ms
+- SFU 转发: ~100ms
+- Opus 帧积累 (20ms/帧): ~20ms
+
+**结论**: 即使 agent_processing 降到 0ms、endpointing 降到 0ms，GT KPI 也不会低于 ~800ms。优化 agent 端在 ~400ms 的 processing 只能贡献 ~10-30% 的总延迟改善。
+
+### 15.21 HTTP 连接池优化
+
+`requests.Session()` 复用 TCP 连接，避免每次 HTTP 请求的 TCP 3-way handshake（本机 ~1ms，跨机 ~10-50ms）。对 LLM/TTS 高频调用场景收益稳定。

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-LiveKit Voice Agent v3 — D6 修复版
+LiveKit Voice Agent v3 — D17 low-latency
 
-修复:
-  F1: LLM 加对话历史（chat_ctx → messages 完整传递）
-  F3: TTS "Response ended prematurely" 安全处理
-  F5: Trace 回退逻辑（非 AutoRTC 也能正常打点）
-  保留 D6 工程师的: 边收边推、DataChannel trace、防污染
+D17 changes:
+  P0-2: STT→LLM prefetch (overlap LLM request with framework processing)
+  P0-3: Two-phase LLM prompt (fast first utterance ≤12 tokens)
+  P0-4: TTS first-frame hot path (flush first chunk immediately)
+  P0-5: Model warm-up on agent start
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import queue as _queue
 import sys
 import time
 import uuid
@@ -64,14 +65,13 @@ MIN_ENDPOINTING = float(os.environ.get("MIN_ENDPOINTING", "0.3"))
 # D15 P0-2: Mode-based configuration (turn_taking or duplex)
 MODE = os.environ.get("MODE", "turn_taking")
 
-# D16 P0-2: Adaptive endpointing — lower base values, controller adds dynamic hold
-#   VAD_ENDPOINTING_SILENCE_MS: base VAD silence (lowered from 500→300 for fast path)
-#   ENDPOINTING_DELAY_MS: pipeline-level delay after VAD END_OF_SPEECH
-#   EndpointingController adds 0-300ms extra hold based on SNR/utterance
+# D17: Aggressive endpointing — base values lowered further, controller adds dynamic hold
+#   Total base for clean short speech: 200ms + 100ms = 300ms (D16 was 500ms)
+#   EndpointingController adds 0-300ms extra hold for noisy/long utterances
 VAD_ENDPOINTING_SILENCE_MS = int(os.environ.get("VAD_ENDPOINTING_SILENCE_MS",
-    "300" if MODE == "turn_taking" else "200"))
+    "200" if MODE == "turn_taking" else "200"))
 ENDPOINTING_DELAY_MS = int(os.environ.get("ENDPOINTING_DELAY_MS",
-    "200" if MODE == "turn_taking" else "100"))
+    "100" if MODE == "turn_taking" else "100"))
 ADAPTIVE_ENDPOINTING = os.environ.get("ADAPTIVE_ENDPOINTING",
     "1" if MODE == "turn_taking" else "0") == "1"
 BARGEIN_MIN_SPEECH_MS = int(os.environ.get("BARGEIN_MIN_SPEECH_MS", "120"))
@@ -90,11 +90,22 @@ MIN_ENDPOINTING = ENDPOINTING_DELAY_MS / 1000.0
 
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "150"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
-LLM_HISTORY_TURNS = int(os.environ.get("LLM_HISTORY_TURNS", "10"))  # F1: 保留最近N轮
+LLM_HISTORY_TURNS = int(os.environ.get("LLM_HISTORY_TURNS", "10"))
 ENABLE_CONTINUATION = os.environ.get("ENABLE_CONTINUATION", "1") == "1"
+
+# D17 P0-2: STT→LLM prefetch (fire LLM request immediately after STT completes)
+FAST_LANE_ENABLED = os.environ.get("FAST_LANE_ENABLED",
+    "1" if MODE == "turn_taking" else "0") == "1"
+# D17 P0-3: Two-phase first-response — short first utterance then continuation
+LLM_MAX_TOKENS_FIRST = int(os.environ.get("LLM_MAX_TOKENS_FIRST", "24"))
+LLM_TEMPERATURE_FIRST = float(os.environ.get("LLM_TEMPERATURE_FIRST", "0.2"))
 
 TRACE_DIR = os.environ.get("TRACE_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output"))
+
+# D17: Reusable HTTP sessions for connection pooling (avoids TCP handshake per call)
+_http_llm = requests.Session()
+_http_tts = requests.Session()
 
 # D7/D8: Ring1 Pre-RTC 录音
 CAPTURE_PRE_RTC = os.environ.get("CAPTURE_PRE_RTC", "1") == "1"
@@ -153,6 +164,15 @@ class TraceCollector:
             "tts_first_to_publish": delta("t_tts_first_chunk", "t_agent_publish_first_frame"),
             "vad_end_to_publish": delta("t_agent_vad_end", "t_agent_publish_first_frame"),
             "vad_end_to_tts_first": delta("t_agent_vad_end", "t_tts_first_chunk"),
+        }
+
+        # D17 P0-1: processing breakdown (all six segments for report)
+        t["proc_breakdown"] = {
+            "vad_to_stt_ms": t["latency_ms"]["vad_end_to_stt_done"],
+            "stt_to_llm_ms": t["latency_ms"]["stt_done_to_llm_first"],
+            "llm_to_tts_ms": t["latency_ms"]["llm_first_to_tts_first"],
+            "tts_to_pub_ms": t["latency_ms"]["tts_first_to_publish"],
+            "vad_to_pub_ms": t["latency_ms"]["vad_end_to_publish"],
         }
 
         try:
@@ -214,25 +234,22 @@ class OmniSTT(stt.STT):
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False),
         )
         self._current_trace_id = None
-        self._llm_ref = None  # D7: LLM 引用，用于在 STT 开始时 propagate trace_id
-        self._tts_ref = None  # D7: TTS 引用
+        self._llm_ref = None
+        self._tts_ref = None
 
     def set_trace_id(self, tid):
         self._current_trace_id = tid
 
     def set_siblings(self, llm_instance, tts_instance):
-        """D7: 让 STT 能在 recognize 开始时就 propagate trace_id 到 LLM/TTS"""
         self._llm_ref = llm_instance
         self._tts_ref = tts_instance
 
     async def _recognize_impl(self, buffer, *, language="zh", conn_options=None):
-        # D7: 在 STT 开始时就创建/确认 trace，立刻 propagate 给 LLM/TTS
         tid = self._current_trace_id
         if not tid:
             tid = _tracer.new_trace()
             self._current_trace_id = tid
         _tracer.mark(tid, "t_agent_vad_end")
-        # 立刻让 LLM 和 TTS 用同一个 trace_id（在 LLM 开始前！）
         if self._llm_ref:
             self._llm_ref.set_trace_id(tid)
         if self._tts_ref:
@@ -258,6 +275,10 @@ class OmniSTT(stt.STT):
             _tracer.mark(tid, "t_stt_done")
         logger.info(f"[STT] → '{text[:60]}'")
 
+        # D17 P0-2: Immediately prefetch LLM reply — overlaps with framework processing
+        if FAST_LANE_ENABLED and self._llm_ref and text:
+            self._llm_ref.prefetch_reply(text, tid)
+
         return stt.SpeechEvent(
             type=stt.SpeechEventType.FINAL_TRANSCRIPT, request_id="stt",
             alternatives=[stt.SpeechData(language="zh", text=text, confidence=0.9 if text else 0.0)],
@@ -272,7 +293,7 @@ class OmniSTT(stt.STT):
             ]}],
         }
         try:
-            resp = requests.post(f"{LLM_BASE_URL}/v1/chat/completions", json=payload, timeout=30)
+            resp = _http_llm.post(f"{LLM_BASE_URL}/v1/chat/completions", json=payload, timeout=30)
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"].strip()
             if text.startswith('"') and text.endswith('"'):
@@ -286,20 +307,148 @@ class OmniSTT(stt.STT):
 # ══════════════════════════════════════════════════════════════
 # LLM — F1: 带对话历史
 # ══════════════════════════════════════════════════════════════
+_LLM_SYS_PROMPT_FAST = (
+    "你是一个友好的语音助手。用中文回复，自然口语化。"
+    "回复规则：第一句必须3-5个字（如'好的'、'嗯嗯'、'明白了'、'没问题'），"
+    "用逗号分隔后再补充详细内容。结合对话上下文。"
+)
+_LLM_SYS_PROMPT_SHORT = (
+    "你是一个友好的语音助手。用中文简短回复（不超过30字），自然口语化。注意结合对话上下文。"
+)
+
+
+def _extract_history(chat_ctx) -> list:
+    """Extract message history from LiveKit chat context."""
+    items = []
+    for item in chat_ctx.items:
+        if not hasattr(item, 'role'):
+            continue
+        role = item.role
+        if role not in ("user", "assistant"):
+            continue
+        text = ""
+        content_list = item.content if isinstance(item.content, list) else [item.content]
+        for c in content_list:
+            if isinstance(c, str) and c.strip():
+                text = c.strip()
+                break
+        if text:
+            items.append({"role": role, "content": text})
+    max_items = LLM_HISTORY_TURNS * 2
+    if len(items) > max_items:
+        items = items[-max_items:]
+    return items
+
+
+def _build_llm_messages(history: list, sys_prompt: str = None) -> list:
+    """Build complete messages array for LLM API call."""
+    if sys_prompt is None:
+        sys_prompt = _LLM_SYS_PROMPT_FAST if ENABLE_CONTINUATION else _LLM_SYS_PROMPT_SHORT
+    messages = [{"role": "system", "content": sys_prompt}]
+    messages.extend(history)
+    if not messages or messages[-1].get("role") != "user":
+        messages.append({"role": "user", "content": "你好"})
+    return messages
+
+
 class OmniLLM(llm.LLM):
     def __init__(self):
         super().__init__()
         self._current_trace_id = None
+        self._chat_history = []
+        # D17 P0-2: prefetch state
+        self._prefetch_queue = None
+        self._prefetch_started = False
 
     def set_trace_id(self, tid):
         self._current_trace_id = tid
 
+    def prefetch_reply(self, user_text: str, tid: str):
+        """D17 P0-2: Start LLM request immediately (called from STT, before framework)."""
+        q = _queue.Queue()
+        self._prefetch_queue = q
+        self._prefetch_started = True
+        history = list(self._chat_history)
+        history.append({"role": "user", "content": user_text})
+        threading.Thread(
+            target=self._run_prefetch, args=(history, tid, q), daemon=True
+        ).start()
+
+    def _run_prefetch(self, history, tid, q):
+        messages = _build_llm_messages(history)
+        payload = {
+            "model": LLM_MODEL, "stream": True,
+            "max_tokens": LLM_MAX_TOKENS, "temperature": LLM_TEMPERATURE,
+            "messages": messages,
+        }
+        try:
+            resp = _http_llm.post(f"{LLM_BASE_URL}/v1/chat/completions",
+                                 json=payload, stream=True, timeout=30)
+            resp.raise_for_status()
+            first_token = True
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    delta_data = chunk["choices"][0].get("delta", {})
+                    if "content" in delta_data and delta_data["content"]:
+                        token = delta_data["content"]
+                        if first_token and tid:
+                            _tracer.mark(tid, "t_llm_first_token")
+                            first_token = False
+                        q.put(token)
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+        except Exception as e:
+            logger.error(f"[LLM Prefetch] Error: {e}")
+        finally:
+            q.put(None)
+
     def chat(self, *, chat_ctx, tools=None, conn_options=None, **kwargs):
+        self._chat_history = _extract_history(chat_ctx)
+        if self._prefetch_started and self._prefetch_queue is not None:
+            q = self._prefetch_queue
+            self._prefetch_queue = None
+            self._prefetch_started = False
+            return PrefetchedLLMStream(
+                prefetch_queue=q, llm_instance=self, chat_ctx=chat_ctx,
+                tools=tools or [], conn_options=conn_options or APIConnectOptions(),
+                trace_id=self._current_trace_id,
+            )
         return OmniLLMStream(
             llm_instance=self, chat_ctx=chat_ctx,
             tools=tools or [], conn_options=conn_options or APIConnectOptions(),
             trace_id=self._current_trace_id,
         )
+
+
+class PrefetchedLLMStream(llm.LLMStream):
+    """D17 P0-2: Reads tokens from a queue that was pre-filled by the prefetch thread."""
+    def __init__(self, prefetch_queue, llm_instance, chat_ctx, tools, conn_options, trace_id=None):
+        super().__init__(llm=llm_instance, chat_ctx=chat_ctx,
+                         tools=tools, conn_options=conn_options)
+        self._q = prefetch_queue
+        self._trace_id = trace_id
+
+    async def _run(self):
+        full_text = ""
+        loop = asyncio.get_event_loop()
+        while True:
+            token = await loop.run_in_executor(None, self._q.get)
+            if token is None:
+                break
+            full_text += token
+            self._event_ch.send_nowait(
+                llm.ChatChunk(
+                    id="omni-prefetch",
+                    delta=llm.ChoiceDelta(role="assistant", content=token)
+                )
+            )
+        logger.info(f"[LLM Prefetch] → '{full_text[:80]}'")
 
 
 class OmniLLMStream(llm.LLMStream):
@@ -309,52 +458,9 @@ class OmniLLMStream(llm.LLMStream):
         self._chat_ctx = chat_ctx
         self._trace_id = trace_id
 
-    def _build_messages(self):
-        """F1: 从 chat_ctx 构建完整 messages（含历史），而非只取最后一句"""
-        if ENABLE_CONTINUATION:
-            sys_prompt = (
-                "你是一个友好的语音助手。用中文回复，自然口语化。"
-                "先用一句短话（10字以内）回应，然后再适当补充。"
-                "注意结合之前的对话上下文回复。"
-            )
-        else:
-            sys_prompt = "你是一个友好的语音助手。用中文简短回复（不超过30字），自然口语化。注意结合对话上下文。"
-
-        messages = [{"role": "system", "content": sys_prompt}]
-
-        # 从 chat_ctx.items 提取历史（最近 N 轮）
-        history_items = []
-        for item in self._chat_ctx.items:
-            if not hasattr(item, 'role'):
-                continue
-            role = item.role
-            if role not in ("user", "assistant"):
-                continue
-            # 提取文本内容
-            text = ""
-            content_list = item.content if isinstance(item.content, list) else [item.content]
-            for c in content_list:
-                if isinstance(c, str) and c.strip():
-                    text = c.strip()
-                    break
-            if text:
-                history_items.append({"role": role, "content": text})
-
-        # 只保留最近 N 轮（每轮 = 1 user + 1 assistant = 2 条）
-        max_items = LLM_HISTORY_TURNS * 2
-        if len(history_items) > max_items:
-            history_items = history_items[-max_items:]
-
-        messages.extend(history_items)
-
-        # 确保最后一条是 user
-        if not messages or messages[-1].get("role") != "user":
-            messages.append({"role": "user", "content": "你好"})
-
-        return messages
-
     async def _run(self):
-        messages = self._build_messages()
+        history = _extract_history(self._chat_ctx)
+        messages = _build_llm_messages(history)
         user_msg = messages[-1]["content"] if messages else "你好"
         logger.info(f"[LLM] User: '{user_msg[:80]}' (history={len(messages)-2} msgs)")
 
@@ -366,7 +472,6 @@ class OmniLLMStream(llm.LLMStream):
             logger.error(f"[LLM] Error: {e}")
 
     def _stream_omni(self, messages):
-        """F1: 接受完整 messages list（含历史）"""
         payload = {
             "model": LLM_MODEL,
             "stream": True,
@@ -375,7 +480,7 @@ class OmniLLMStream(llm.LLMStream):
             "messages": messages,
         }
 
-        resp = requests.post(f"{LLM_BASE_URL}/v1/chat/completions",
+        resp = _http_llm.post(f"{LLM_BASE_URL}/v1/chat/completions",
                              json=payload, stream=True, timeout=30)
         resp.raise_for_status()
 
@@ -394,7 +499,6 @@ class OmniLLMStream(llm.LLMStream):
                     token = delta_data["content"]
                     full_text += token
 
-                    # F5: 无条件记录 llm_first_token（不再要求 t_stt_done 存在）
                     if first_token and self._trace_id:
                         _tracer.mark(self._trace_id, "t_llm_first_token")
                         first_token = False
@@ -566,13 +670,15 @@ class QwenTTSStream(tts.ChunkedStream):
             logger.debug(f"[TTS] reply event send err: {e}")
 
     def _stream_tts_worker(self, text, trace_id, frame_bytes, loop, out_queue, stop_event):
-        """F3: 边收边推 worker，安全处理所有异常"""
+        """D17 P0-4: First-frame hot path — flush first chunk immediately."""
         payload = {"text": text, "speaker": TTS_SPEAKER}
         carry = bytearray()
         first_chunk = True
         resp = None
+        # D17 P0-4: First chunk threshold — push as soon as we have 10ms of audio
+        first_frame_bytes = max(frame_bytes // 2, 480)
         try:
-            resp = requests.post(TTS_URL, json=payload, stream=True, timeout=(5, 15))
+            resp = _http_tts.post(TTS_URL, json=payload, stream=True, timeout=(5, 15))
             resp.raise_for_status()
 
             for chunk in resp.iter_content(chunk_size=4096):
@@ -581,11 +687,18 @@ class QwenTTSStream(tts.ChunkedStream):
                 if not chunk:
                     continue
                 if first_chunk and trace_id:
-                    # F5: 无条件记录
                     _tracer.mark(trace_id, "t_tts_first_chunk")
                     first_chunk = False
 
                 carry.extend(chunk)
+
+                # D17 P0-4: For the very first push, use smaller threshold
+                if first_chunk is False and len(carry) >= first_frame_bytes and first_frame_bytes < frame_bytes:
+                    frame = bytes(carry[:])
+                    carry.clear()
+                    loop.call_soon_threadsafe(out_queue.put_nowait, frame)
+                    first_frame_bytes = frame_bytes  # switch to normal after first push
+
                 while len(carry) >= frame_bytes:
                     frame = bytes(carry[:frame_bytes])
                     del carry[:frame_bytes]
@@ -594,7 +707,6 @@ class QwenTTSStream(tts.ChunkedStream):
             if carry and not stop_event.is_set():
                 loop.call_soon_threadsafe(out_queue.put_nowait, bytes(carry))
         except Exception as e:
-            # F3: 不抛异常到主协程，只 warning
             if not stop_event.is_set():
                 logger.warning(f"[TTS] Stream error: {e}")
         finally:
@@ -659,12 +771,39 @@ class QwenVoiceAgent(Agent):
 
     async def on_enter(self):
         logger.info(f"[Agent] on_enter | VAD={VAD_SILENCE_MS}ms FRAME={TTS_FRAME_MS}ms "
-                     f"CONT={ENABLE_CONTINUATION} HIST={LLM_HISTORY_TURNS}")
+                     f"CONT={ENABLE_CONTINUATION} HIST={LLM_HISTORY_TURNS} "
+                     f"FAST_LANE={FAST_LANE_ENABLED}")
+        # D17 P0-5: warm up STT/LLM/TTS in background to avoid cold-start spikes
+        asyncio.create_task(self._warmup())
         try:
             await self.session.say("你好，我是语音助手，有什么可以帮你的？")
             logger.info("[Agent] Welcome sent")
         except Exception as e:
             logger.error(f"[Agent] on_enter fail: {e}")
+
+    async def _warmup(self):
+        """D17 P0-5: Pre-warm model endpoints to eliminate cold-start latency."""
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._warmup_sync)
+        except Exception as e:
+            logger.warning(f"[Agent] Warm-up error: {e}")
+
+    def _warmup_sync(self):
+        t0 = time.time()
+        try:
+            _http_llm.post(f"{LLM_BASE_URL}/v1/chat/completions", json={
+                "model": LLM_MODEL, "stream": False, "max_tokens": 5,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": "hi"}],
+            }, timeout=10)
+        except Exception:
+            pass
+        try:
+            _http_tts.post(TTS_URL, json={"text": "嗯", "speaker": TTS_SPEAKER}, timeout=10)
+        except Exception:
+            pass
+        logger.info(f"[Agent] Warm-up done ({time.time()-t0:.1f}s)")
 
     async def on_user_turn_completed(self, turn_ctx, **kwargs):
         new_msg = kwargs.get("new_message", None)
@@ -799,7 +938,7 @@ if __name__ == "__main__":
     logger.info(f"[Config] MODE={MODE} "
                 f"VAD_SILENCE={VAD_ENDPOINTING_SILENCE_MS}ms ENDP_DELAY={ENDPOINTING_DELAY_MS}ms "
                 f"(base_total={VAD_ENDPOINTING_SILENCE_MS + ENDPOINTING_DELAY_MS}ms) "
-                f"ADAPTIVE={ADAPTIVE_ENDPOINTING} "
+                f"ADAPTIVE_EP={ADAPTIVE_ENDPOINTING} FAST_LANE={FAST_LANE_ENABLED} "
                 f"BARGEIN_MIN_SPEECH={BARGEIN_MIN_SPEECH_MS}ms "
                 f"BARGEIN_THRESH={BARGEIN_ACTIVATION_THRESHOLD} "
                 f"NOISE_GATE={NOISE_GATE_ENABLED} "

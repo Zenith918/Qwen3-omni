@@ -1299,3 +1299,76 @@ Full 16-case verification: 16/16 PASS
 | duplex_cases.json | 新增 duplex 专用测试集 |
 | long_fast.wav/long_pause_expected.wav | 新增 WAV 替换问题样本 |
 | golden/d16_userkpi_gt_baseline/ | 5x mini + full16 + 3x stability + stats |
+
+## Phase 14: D17 — 低延迟优化 + 处理链路拆分
+
+### 目标
+在 `turn_taking` 模式下保持 `talk_over_gt == 0`，将 GT_TT_P95 从 D16 的 ~1329ms(mini) / ~1589ms(full16) 压到更低，同时消除 full16 偶发 1700ms+ 尖刺。
+
+### P0-1: Processing Breakdown Table
+- Agent trace 新增 `proc_breakdown` 字段，包含 5 段分段延迟
+- `run_suite.py` 读取 agent trace 文件并按时间戳关联 browser trace
+- Report 顶部新增 Processing Breakdown Table（P50/P95）+ Outlier Table（top 3 slowest turns）
+- `summary.json` 新增字段：`gt_tt_p95_ms`、`proc_breakdown_p95`、`outlier_cases`
+
+### P0-2: STT→LLM Prefetch
+- STT 完成后立刻在后台线程中启动 LLM 请求（`prefetch_reply()`）
+- LLM.chat() 检测到 prefetch 队列后返回 `PrefetchedLLMStream`，直接消费已有 token
+- 实测 stt→llm 段 P95=46ms（相当于 LLM prefill 时间，framework overhead 被完全 overlap）
+
+### P0-3: LLM 两段式首响
+- System prompt 改为强制"第一句 3-5 字"（如'好的'、'嗯嗯'）
+- 逗号后再补充详细内容
+- 确保 TTS 能尽快拿到可合成的文本段
+
+### P0-4: TTS First-Frame Hot Path
+- TTS worker 首帧阈值降到 `frame_bytes/2`（480 bytes = 10ms @24kHz）
+- 首次 push 立刻 flush，后续恢复正常 20ms 帧
+
+### P0-5: 模型 Warm-up + HTTP 连接池
+- Agent 启动时异步调用 STT/TTS warm-up（避免冷启动尖刺）
+- 全局 `requests.Session()` 复用 TCP 连接，避免每次建连开销
+
+### Endpointing 调优
+- VAD silence: 300→200ms, pipeline delay: 200→100ms（base total: 500→300ms）
+- EndpointingController 自适应 hold 不变（clean_short=0ms, clean_long=100ms, noisy=300ms）
+
+### 结果
+
+**Mini 5x stability:**
+- P95 mean: 1319ms (std=2.5ms) — D16: 1329ms (std=16ms)
+- 改善: -10ms P95, std 减 84%
+
+**Full16 3x stability:**
+- P95 mean: 1425ms (std=37ms) — D16: 1589ms (std=96ms)
+- 改善: **-164ms P95 (10.3%)**
+- 波动下降: std 96→37ms (**61% reduction**)
+- **无 1700ms+ 尖刺**（max P95=1473ms, D16 max=1748ms）
+
+**Processing Breakdown P95:**
+| Segment | P95 (ms) |
+|---------|----------|
+| vad→stt (STT) | 125 |
+| stt→llm (prefetch) | 46 |
+| llm→tts (bottleneck) | 331 |
+| tts→pub | 1 |
+| **vad→pub (total)** | **471** |
+
+**Gates:**
+- talk_over_gt = 0（全部 runs）
+- FAIL threshold: 1500ms（D16: 1800ms）
+- WARN threshold: 1150ms（stretch target）
+
+### 关键发现
+- WebRTC 双向传输延迟 ~800ms 是不可压缩的固定开销，占 GT KPI 的 ~60%
+- LLM→TTS 段（331ms P95）是 agent 端最大瓶颈，主要由 LLM token 生成 + TTS 首包合成时间组成
+- 1150ms 目标需要进一步的架构变更（如 fast-lane audio→reply、TTS streaming）
+
+### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| livekit_agent.py | STT→LLM prefetch + 两段式 prompt + TTS hot path + warm-up + 连接池 + 降低 endpointing |
+| run_suite.py | Processing Breakdown + Outlier Table + agent trace join |
+| audio_metrics.py | D17 FAIL/WARN 阈值 |
+| golden/d17_userkpi_gt_baseline/ | 5x mini + 4x full16 + baseline stats |

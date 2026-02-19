@@ -722,11 +722,11 @@ def main() -> int:
         except Exception:
             pass
 
-    # Gate thresholds (D16: recalibrated from 5x mini + 4x full16 stability)
-    # Mini P95 mean=1329ms (std=16ms). Full16 P95 range: 1532-1748ms.
-    # Full16 P95 mean=1589, std=96 → FAIL = mean+2*std ≈ 1800ms
-    USER_KPI_GT_WARN_THRESHOLD_MS = 1400.0
-    USER_KPI_GT_FAIL_THRESHOLD_MS = 1800.0
+    # Gate thresholds (D17: frozen from 5x mini + 3x full16 stability)
+    # Full16 P95: mean=1425ms, std=37ms → FAIL = mean+2*std ≈ 1500ms
+    # WARN = D17 stretch target (1150ms)
+    USER_KPI_GT_WARN_THRESHOLD_MS = 1150.0
+    USER_KPI_GT_FAIL_THRESHOLD_MS = 1500.0
     USER_KPI_GT_FAIL_READY = True
     warn_gates = {}
 

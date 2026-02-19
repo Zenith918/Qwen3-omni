@@ -1,0 +1,59 @@
+{
+  "version": "D17",
+  "frozen_at": "2026-02-19T03:50:00Z",
+  "mode": "turn_taking",
+  "config": {
+    "VAD_ENDPOINTING_SILENCE_MS": 200,
+    "ENDPOINTING_DELAY_MS": 100,
+    "ADAPTIVE_ENDPOINTING": true,
+    "FAST_LANE_ENABLED": true,
+    "NOISE_GATE_ENABLED": true,
+    "BARGEIN_MIN_SPEECH_MS": 120,
+    "BARGEIN_ACTIVATION_THRESHOLD": 0.7,
+    "TTS_FRAME_MS": 20,
+    "ENABLE_CONTINUATION": true
+  },
+  "mini_5x": {
+    "runs": 5,
+    "p95_values_ms": [1318, 1320, 1316, 1323, 1320],
+    "p95_mean_ms": 1319.4,
+    "p95_std_ms": 2.5,
+    "talk_over_gt_count": 0
+  },
+  "full16_stability_3x": {
+    "runs": 3,
+    "p95_values_ms": [1419, 1473, 1382],
+    "p95_mean_ms": 1424.7,
+    "p95_std_ms": 37.4,
+    "p50_values_ms": [1322, 1318, 1318],
+    "p50_mean_ms": 1319.3,
+    "min_values_ms": [1278, 1268, 1263],
+    "talk_over_gt_count": 0,
+    "max_single_case_ms": 1508
+  },
+  "full16_initial": {
+    "p95_ms": 1476,
+    "p50_ms": 1320,
+    "talk_over_gt_count": 0
+  },
+  "FAIL_threshold_ms": 1500.0,
+  "WARN_threshold_ms": 1150.0,
+  "d16_comparison": {
+    "d16_mini_p95_mean_ms": 1329,
+    "d17_mini_p95_mean_ms": 1319,
+    "mini_improvement_ms": 10,
+    "d16_full16_p95_mean_ms": 1589,
+    "d17_full16_p95_mean_ms": 1425,
+    "full16_improvement_ms": 164,
+    "d16_full16_p95_std_ms": 96,
+    "d17_full16_p95_std_ms": 37,
+    "stability_improvement_pct": 61.5
+  },
+  "processing_breakdown_p95_ms": {
+    "vad_to_stt": 125,
+    "stt_to_llm": 46,
+    "llm_to_tts": 331,
+    "tts_to_pub": 1,
+    "vad_to_pub": 471
+  }
+}

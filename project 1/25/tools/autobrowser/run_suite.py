@@ -60,6 +60,29 @@ def _ts_run_id() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
 
+def _read_agent_traces(trace_file: str) -> dict:
+    """D17 P0-1: Read agent-side traces for processing breakdown."""
+    traces = {}
+    if not os.path.exists(trace_file):
+        return traces
+    try:
+        with open(trace_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    t = json.loads(line)
+                    tid = t.get("trace_id")
+                    if tid:
+                        traces[tid] = t
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+    return traces
+
+
 def _fetch_token(token_api: str, room: str, identity: str) -> tuple:
     """Fetch LiveKit token from token server."""
     r = requests.get(token_api, params={"room": room, "identity": identity}, timeout=15)
@@ -588,6 +611,8 @@ def main() -> int:
             "browser_trace_count": len(traces),
             "gt_speech_end_ms": gt_speech_end_ms,
             "browser_eot_lag_ms": browser_eot_lag_ms,
+            "_t_start": t_start,
+            "_t_end": t_end,
         }
         summary["cases"].append(case_result)
 
@@ -604,6 +629,46 @@ def main() -> int:
 
     # Clean up wav cache
     shutil.rmtree(wav_cache_dir, ignore_errors=True)
+
+    # D17 P0-1: Read agent traces and join processing breakdown
+    agent_trace_file = os.path.join(PROJECT_ROOT, "output", "day5_e2e_traces.jsonl")
+    agent_traces = _read_agent_traces(agent_trace_file)
+    # Match by trace_id first; fallback to timestamp correlation
+    agent_trace_list = sorted(agent_traces.values(), key=lambda t: t.get("created_at", 0))
+    used_agent_idx = set()
+    for c in summary["cases"]:
+        tid = c.get("trace_id")
+        at = agent_traces.get(tid, {})
+        # Fallback: match by closest timestamp within the case's time window
+        if not at and agent_trace_list:
+            case_start = c.get("_t_start", 0)
+            case_end = c.get("_t_end", 0)
+            if case_start and case_end:
+                best_match = None
+                best_dist = float("inf")
+                for ai, at_cand in enumerate(agent_trace_list):
+                    if ai in used_agent_idx:
+                        continue
+                    ct = at_cand.get("created_at", 0)
+                    if case_start - 5 <= ct <= case_end + 5:
+                        dist = abs(ct - (case_start + case_end) / 2)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_match = (ai, at_cand)
+                if best_match:
+                    used_agent_idx.add(best_match[0])
+                    at = best_match[1]
+        breakdown = at.get("proc_breakdown") or at.get("latency_ms", {})
+        c["proc_breakdown"] = {
+            "vad_to_stt_ms": breakdown.get("vad_to_stt_ms") or breakdown.get("vad_end_to_stt_done"),
+            "stt_to_llm_ms": breakdown.get("stt_to_llm_ms") or breakdown.get("stt_done_to_llm_first"),
+            "llm_to_tts_ms": breakdown.get("llm_to_tts_ms") or breakdown.get("llm_first_to_tts_first"),
+            "tts_to_pub_ms": breakdown.get("tts_to_pub_ms") or breakdown.get("tts_first_to_publish"),
+            "vad_to_pub_ms": breakdown.get("vad_to_pub_ms") or breakdown.get("vad_end_to_publish"),
+        }
+        ep = at.get("endpointing_params")
+        if ep:
+            c["endpointing_params"] = ep
 
     # Summary stats
     total = len(summary["cases"])
@@ -720,6 +785,39 @@ def main() -> int:
     else:
         summary["gt_duplex_count"] = 0
 
+    # D17 P0-1: Processing Breakdown P50/P95 + top offender + outlier table
+    breakdown_keys = ["vad_to_stt_ms", "stt_to_llm_ms", "llm_to_tts_ms",
+                      "tts_to_pub_ms", "vad_to_pub_ms"]
+    proc_breakdown_p95 = {}
+    for key in breakdown_keys:
+        vals = [c["proc_breakdown"][key] for c in summary["cases"]
+                if c.get("proc_breakdown") and c["proc_breakdown"].get(key) is not None]
+        if vals:
+            arr = np.array(vals, dtype=np.float64)
+            proc_breakdown_p95[key] = round(float(np.percentile(arr, 95)), 1)
+            summary[f"breakdown_{key}_p50"] = round(float(np.percentile(arr, 50)), 1)
+            summary[f"breakdown_{key}_p95"] = proc_breakdown_p95[key]
+    summary["proc_breakdown_p95"] = proc_breakdown_p95
+
+    # D17: gt_tt_p95_ms as top-level field
+    if summary.get("gt_tt_count", 0) > 0:
+        summary["gt_tt_p95_ms"] = summary.get("gt_tt_p95_ms", summary.get("gt_kpi_raw_p95_ms"))
+
+    # D17: Outlier table — top 3 slowest turns by GT raw KPI
+    outlier_cases = []
+    cases_with_gt = [c for c in summary["cases"]
+                     if c.get("user_kpi_gt_raw_ms") is not None]
+    cases_with_gt.sort(key=lambda c: c["user_kpi_gt_raw_ms"], reverse=True)
+    for c in cases_with_gt[:3]:
+        entry = {
+            "case_id": c["case_id"],
+            "gt_raw_ms": c["user_kpi_gt_raw_ms"],
+        }
+        if c.get("proc_breakdown"):
+            entry.update(c["proc_breakdown"])
+        outlier_cases.append(entry)
+    summary["outlier_cases"] = outlier_cases
+
     summary_path = os.path.join(run_dir, "summary.json")
     write_json(summary_path, summary)
 
@@ -756,13 +854,13 @@ def main() -> int:
 
 
 def _write_report(report_path: str, summary: dict, net_profile: str):
-    """Generate markdown report (D16: GT KPI + adaptive endpointing)."""
+    """Generate markdown report (D17: breakdown + outlier tables)."""
     ensure_parent(report_path)
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# AutoBrowser Report (D16)\n\n")
+        f.write("# AutoBrowser Report (D17)\n\n")
 
-        # D15 P0-1: PRIMARY — GT-based Turn-taking KPI
-        f.write("## USER_KPI_GT Turn-taking (is_talk_over_gt=false)\n\n")
+        # GT Turn-taking KPI
+        f.write("## TT KPI (GT)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
         gt_tt_count = summary.get("gt_tt_count", 0)
         if gt_tt_count > 0:
@@ -773,12 +871,54 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
                 if v is not None:
                     f.write(f"| {lbl} | {v:.0f} ms |\n")
         f.write(f"| count | {gt_tt_count} / {summary.get('gt_kpi_count', 0)} |\n")
+        f.write(f"| talk_over_gt_count | {summary.get('talk_over_gt_count', 0)} |\n")
         f.write(f"| talk_over_gt_rate | {summary.get('gt_talk_over_rate', 0):.1%} |\n")
         if gt_tt_count == 0:
             f.write("| (all cases are talk-over) | -- |\n")
         f.write("\n")
 
-        # D15: GT-based Duplex KPI
+        # D17 P0-1: Processing Breakdown Table
+        f.write("## Processing Breakdown (agent-side)\n\n")
+        f.write("| Segment | P50 | P95 |\n|---------|-----|-----|\n")
+        bd_labels = [
+            ("vad_end → stt_done", "vad_to_stt_ms"),
+            ("stt_done → llm_first_token", "stt_to_llm_ms"),
+            ("llm_first_token → tts_first_chunk", "llm_to_tts_ms"),
+            ("tts_first_chunk → publish_first_frame", "tts_to_pub_ms"),
+            ("**vad_end → publish (total)**", "vad_to_pub_ms"),
+        ]
+        p95_max_key = None
+        p95_max_val = -1
+        for label, key in bd_labels:
+            p50 = summary.get(f"breakdown_{key}_p50")
+            p95 = summary.get(f"breakdown_{key}_p95")
+            p50_s = f"{p50:.0f} ms" if p50 is not None else "--"
+            p95_s = f"{p95:.0f} ms" if p95 is not None else "--"
+            f.write(f"| {label} | {p50_s} | {p95_s} |\n")
+            if p95 is not None and key != "vad_to_pub_ms" and p95 > p95_max_val:
+                p95_max_val = p95
+                p95_max_key = label
+        if p95_max_key:
+            f.write(f"\n> **P95 bottleneck**: {p95_max_key} ({p95_max_val:.0f} ms)\n")
+        f.write("\n")
+
+        # D17: Outlier Table (top 3 slowest turns)
+        outliers = summary.get("outlier_cases", [])
+        if outliers:
+            f.write("## Outlier Table (slowest 3 turns)\n\n")
+            f.write("| case_id | gt_raw_ms | vad→stt | stt→llm | llm→tts | tts→pub | vad→pub |\n")
+            f.write("|---------|-----------|---------|---------|---------|---------|----------|\n")
+            for o in outliers:
+                def _v(k):
+                    v = o.get(k)
+                    return f"{v:.0f}" if v is not None else "--"
+                f.write(f"| {o['case_id']} | {_v('gt_raw_ms')} "
+                        f"| {_v('vad_to_stt_ms')} | {_v('stt_to_llm_ms')} "
+                        f"| {_v('llm_to_tts_ms')} | {_v('tts_to_pub_ms')} "
+                        f"| {_v('vad_to_pub_ms')} |\n")
+            f.write("\n")
+
+        # GT Duplex KPI
         f.write("## USER_KPI_GT Duplex (is_talk_over_gt=true, abs values)\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
         gt_dup_count = summary.get("gt_duplex_count", 0)
@@ -794,16 +934,16 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
             f.write("| (no talk-over) | -- |\n")
         f.write("\n")
 
-        # D15: EOT_LAG diagnostic
+        # EOT_LAG diagnostic
         if summary.get("browser_eot_lag_count", 0) > 0:
-            f.write("## EOT_LAG Diagnostic (browser EoT - GT EoT)\n\n")
+            f.write("## EOT_LAG Diagnostic\n\n")
             f.write("| Metric | Value |\n|--------|-------|\n")
             f.write(f"| eot_lag P50 | {summary['browser_eot_lag_p50_ms']:.0f} ms |\n")
             f.write(f"| eot_lag P95 | {summary['browser_eot_lag_p95_ms']:.0f} ms |\n")
             f.write(f"| samples | {summary['browser_eot_lag_count']} |\n")
             f.write("\n")
 
-        # D15: Legacy browser-based (reference, demoted)
+        # Legacy browser-based (reference, demoted)
         f.write("## (Reference) Browser-based KPI\n\n")
         f.write("| Metric | Value |\n|--------|-------|\n")
         for lbl, key in [("raw P50", "user_kpi_raw_p50_ms"), ("raw P95", "user_kpi_raw_p95_ms"),
@@ -825,23 +965,25 @@ def _write_report(report_path: str, summary: dict, net_profile: str):
         f.write(f"- total: `{summary['total_cases']}`, ok: `{summary['ok_cases']}`, "
                 f"joined: `{summary['joined_cases']}`, has_audio: `{summary['has_audio_cases']}`\n\n")
 
-        # Per-case detail with GT columns
+        # Per-case detail with breakdown columns
         f.write("## Per-Case Detail\n\n")
-        f.write("| # | case_id | tier | ok | gt_raw_ms | gt_clamp_ms | TO_gt "
-                "| browser_raw_ms | eot_lag_ms | elapsed |\n")
-        f.write("|---|---------|------|----|-----------|-------------|-------"
-                "|----------------|------------|----------|\n")
+        f.write("| # | case_id | ok | gt_raw | TO_gt "
+                "| vad→stt | stt→llm | llm→tts | tts→pub | vad→pub |\n")
+        f.write("|---|---------|----|---------|----- "
+                "|---------|---------|---------|---------|----------|\n")
         for i, c in enumerate(summary.get("cases", [])):
             ok_s = "PASS" if c.get("ok") else "FAIL"
             gt_raw = f"{c['user_kpi_gt_raw_ms']:.0f}" if c.get('user_kpi_gt_raw_ms') is not None else "--"
-            gt_clamp = f"{c['user_kpi_gt_clamped_ms']:.0f}" if c.get('user_kpi_gt_clamped_ms') is not None else "--"
             to_gt = "Y" if c.get("is_talk_over_gt") else ""
-            b_raw = f"{c['user_kpi_raw_ms']:.0f}" if c.get('user_kpi_raw_ms') is not None else "--"
-            lag = f"{c['browser_eot_lag_ms']:.0f}" if c.get('browser_eot_lag_ms') is not None else "--"
-            elapsed = f"{c.get('elapsed_s', 0):.0f}s"
-            f.write(f"| {i+1} | {c['case_id']} | {c.get('tier','P0')} | {ok_s} "
-                    f"| {gt_raw} | {gt_clamp} | {to_gt} "
-                    f"| {b_raw} | {lag} | {elapsed} |\n")
+            bd = c.get("proc_breakdown", {})
+            def _bv(k):
+                v = bd.get(k)
+                return f"{v:.0f}" if v is not None else "--"
+            f.write(f"| {i+1} | {c['case_id']} | {ok_s} "
+                    f"| {gt_raw} | {to_gt} "
+                    f"| {_bv('vad_to_stt_ms')} | {_bv('stt_to_llm_ms')} "
+                    f"| {_bv('llm_to_tts_ms')} | {_bv('tts_to_pub_ms')} "
+                    f"| {_bv('vad_to_pub_ms')} |\n")
 
         # Net profile info
         f.write(f"\n## Network Profile: `{net_profile}`\n\n")
